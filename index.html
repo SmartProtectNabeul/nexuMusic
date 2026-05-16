@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NexoMusic — Stream Any Song</title>
+  <meta name="description" content="Search and stream millions of songs instantly. No downloads, no ads, no login." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Main App -->
+  <div id="app" class="app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <span class="brand-icon">🎵</span>
+          <span class="brand-name">NexoMusic</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-view="home" id="nav-home">
+          <svg viewBox="0 0 24 24"><path d="M3 9.5L12 3l9 6.5V21H15v-7H9v7H3V9.5z"/></svg>
+          <span>Home</span>
+        </a>
+        <a href="#" class="nav-item" data-view="search" id="nav-search">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <span>Search</span>
+        </a>
+        <a href="#" class="nav-item" data-view="library" id="nav-library">
+          <svg viewBox="0 0 24 24"><path d="M3 3h4v18H3zM10 3h11v2H10zM10 10h11v2H10zM10 19h11v2H10z"/></svg>
+          <span>Library</span>
+        </a>
+        <a href="#" class="nav-item" data-view="liked" id="nav-liked">
+          <svg viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+          <span>Liked Songs</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-playlists">
+        <div class="playlist-header">
+          <span>Playlists</span>
+          <button class="btn-add-playlist" id="btn-add-playlist" title="New Playlist">+</button>
+        </div>
+        <div class="playlist-list" id="playlist-list"></div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content" id="main-content">
+
+      <!-- Top Bar -->
+      <header class="topbar">
+        <div class="topbar-nav">
+          <button class="btn-icon" id="btn-back" title="Back">
+            <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <button class="btn-icon" id="btn-forward" title="Forward">
+            <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <div class="topbar-search">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="text" id="search-input" placeholder="Search songs, artists, albums…" autocomplete="off" />
+            <button class="btn-clear-search hidden" id="btn-clear-search" title="Clear">✕</button>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="account-menu" id="account-menu-container">
+            <div class="avatar" id="user-avatar" title="Account">?</div>
+            <div class="account-dropdown hidden" id="account-dropdown">
+              <div class="dropdown-header" id="account-email">user@example.com</div>
+              <div class="dropdown-item" id="btn-logout">Sign Out</div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Views -->
+      <div class="views-container">
+
+        <!-- HOME -->
+        <section class="view active" id="view-home">
+          <h2 class="section-title">Good <span id="greeting-time"></span> 👋</h2>
+          <div class="featured-grid" id="featured-grid"></div>
+          <h3 class="section-subtitle">Recently Played</h3>
+          <div class="tracks-row" id="recent-tracks"></div>
+          <h3 class="section-subtitle">Trending Music</h3>
+          <div class="tracks-row" id="trending-tracks"></div>
+        </section>
+
+        <!-- SEARCH -->
+        <section class="view" id="view-search">
+          <div class="search-results-header">
+            <h2 class="section-title">Search Results</h2>
+            <span class="results-count" id="results-count"></span>
+          </div>
+          <div class="tracks-list" id="search-results"></div>
+          <div class="empty-state" id="search-empty">
+            <div class="empty-icon">🔍</div>
+            <h3>Find your next favorite song</h3>
+            <p>Search for any song, artist, or album above</p>
+          </div>
+          <div class="loading-state hidden" id="search-loading">
+            <div class="spinner"></div>
+            <p>Searching…</p>
+          </div>
+        </section>
+
+        <!-- LIBRARY -->
+        <section class="view" id="view-library">
+          <h2 class="section-title">Your Library</h2>
+          <div class="library-tabs">
+            <button class="lib-tab active" data-tab="playlists">Playlists</button>
+            <button class="lib-tab" data-tab="recent">Recently Played</button>
+          </div>
+          <div class="library-content" id="library-content"></div>
+        </section>
+
+        <!-- LIKED -->
+        <section class="view" id="view-liked">
+          <div class="liked-header">
+            <div class="liked-cover">❤️</div>
+            <div class="liked-info">
+              <span class="liked-tag">Playlist</span>
+              <h2 class="liked-title">Liked Songs</h2>
+              <span id="liked-count" class="liked-count">0 songs</span>
+            </div>
+          </div>
+          <div class="tracks-list" id="liked-tracks"></div>
+          <div class="empty-state hidden" id="liked-empty">
+            <div class="empty-icon">🎵</div>
+            <h3>Songs you like will appear here</h3>
+            <p>Save songs by clicking the heart icon</p>
+          </div>
+        </section>
+
+        <!-- PLAYLIST -->
+        <section class="view" id="view-playlist">
+          <div class="playlist-header-view" id="playlist-header-view"></div>
+          <div class="tracks-list" id="playlist-tracks"></div>
+          <div class="empty-state hidden" id="playlist-empty">
+            <div class="empty-icon">🎶</div>
+            <h3>This playlist is empty</h3>
+            <p>Search for songs and add them here</p>
+          </div>
+        </section>
+
+      </div>
+    </main>
+
+    <!-- Queue Panel -->
+    <aside class="queue-panel hidden" id="queue-panel">
+      <div class="queue-header">
+        <h3>Queue</h3>
+        <button class="btn-icon" id="btn-close-queue">✕</button>
+      </div>
+      <div class="queue-list" id="queue-list"></div>
+    </aside>
+
+  </div>
+
+  <!-- Player Bar -->
+  <footer class="player-bar" id="player-bar">
+    <div class="now-playing" id="now-playing">
+      <div class="np-thumb" id="np-thumb"><div class="np-thumb-placeholder">♪</div></div>
+      <div class="np-info">
+        <div class="np-title" id="np-title">Pick a song to play</div>
+        <div class="np-artist" id="np-artist">NexoMusic</div>
+      </div>
+      <button class="btn-like-player" id="btn-like-player" title="Like">
+        <svg viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+      </button>
+    </div>
+
+    <div class="player-controls">
+      <div class="control-buttons">
+        <button class="btn-ctrl" id="btn-shuffle" title="Shuffle">
+          <svg viewBox="0 0 24 24"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+        </button>
+        <button class="btn-ctrl" id="btn-prev" title="Previous">
+          <svg viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+        </button>
+        <button class="btn-play-main" id="btn-play-pause" title="Play/Pause">
+          <svg id="icon-play" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <svg id="icon-pause" viewBox="0 0 24 24" class="hidden"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        </button>
+        <button class="btn-ctrl" id="btn-next" title="Next">
+          <svg viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+        </button>
+        <button class="btn-ctrl" id="btn-repeat" title="Repeat">
+          <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        </button>
+      </div>
+      <div class="progress-bar-container">
+        <span class="time-current" id="time-current">0:00</span>
+        <div class="progress-bar" id="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+          <div class="progress-thumb" id="progress-thumb"></div>
+        </div>
+        <span class="time-total" id="time-total">0:00</span>
+      </div>
+    </div>
+
+    <div class="player-right">
+      <button class="btn-ctrl btn-sm-ctrl" id="btn-queue" title="Queue">
+        <svg viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+      </button>
+      <div class="volume-control">
+        <button class="btn-ctrl btn-sm-ctrl" id="btn-mute" title="Mute">
+          <svg id="icon-volume" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          <svg id="icon-muted" viewBox="0 0 24 24" class="hidden"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+        </button>
+        <div class="volume-bar" id="volume-bar">
+          <div class="volume-fill" id="volume-fill" style="width:80%"></div>
+          <div class="volume-thumb" id="volume-thumb" style="left:80%"></div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Context Menu -->
+  <div class="context-menu hidden" id="context-menu">
+    <div class="ctx-item" id="ctx-add-queue">Add to Queue</div>
+    <div class="ctx-item" id="ctx-like">❤ Like</div>
+    <div class="ctx-item ctx-has-sub" id="ctx-add-playlist">Add to Playlist ›
+      <div class="ctx-submenu hidden" id="ctx-submenu"></div>
+    </div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" id="ctx-copy-link">Copy YouTube Link</div>
+  </div>
+
+  <!-- New Playlist Modal -->
+  <div class="modal-overlay hidden" id="playlist-modal">
+    <div class="modal-card modal-small">
+      <h3>New Playlist</h3>
+      <div class="input-group">
+        <label for="playlist-name-input">Playlist name</label>
+        <input type="text" id="playlist-name-input" placeholder="My Playlist #1" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="btn-cancel-playlist">Cancel</button>
+        <button class="btn-primary" id="btn-create-playlist">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auth Modal -->
+  <div class="modal-overlay hidden" id="auth-modal">
+    <div class="modal-card modal-small">
+      <div class="modal-logo" style="text-align:center; margin-bottom:20px;">
+        <div class="logo-icon" style="font-size:40px;">🎵</div>
+        <h1 style="font-size:24px; font-weight:800; background:linear-gradient(135deg,var(--accent),#1a8fff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-top:8px;">NexoMusic</h1>
+      </div>
+      <h3 style="text-align:center; margin-bottom:20px;" id="auth-title">Sign In</h3>
+      <form id="auth-form" onsubmit="event.preventDefault();">
+        <div class="input-group">
+          <label for="auth-email">Email</label>
+          <input type="email" id="auth-email" placeholder="you@example.com" required />
+        </div>
+        <div class="input-group">
+          <label for="auth-password">Password</label>
+          <input type="password" id="auth-password" placeholder="••••••••" required minlength="4" />
+        </div>
+        <div class="modal-actions" style="flex-direction:column; gap:10px; margin-top:24px;">
+          <button type="submit" class="btn-primary" style="width:100%" id="btn-auth-submit">Sign In</button>
+          <button type="button" class="btn-ghost" style="width:100%" id="btn-auth-toggle">Create an account instead</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast hidden" id="toast"></div>
+
+  <!-- Hidden YouTube IFrame -->
+  <div id="yt-player-container"><div id="yt-player"></div></div>
+
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="app.js"></script>
+</body>
+</html>
