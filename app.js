@@ -72,7 +72,7 @@ function showView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   const v=$('view-'+name); if(v) v.classList.add('active');
-  const n=$('nav-'+name);  if(n) n.classList.add('active');
+  document.querySelectorAll('.nav-item[data-view="'+name+'"]').forEach(n=>n.classList.add('active'));
   S.view = name;
 }
 document.querySelectorAll('.nav-item').forEach(el => {
