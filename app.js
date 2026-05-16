@@ -1,6 +1,8 @@
 // ── API helpers ──────────────────────────────────────────────────────────────
+const API_BASE = 'https://nexumusic.onrender.com';
+
 async function apiFetch(path) {
-  const r = await fetch(path);
+  const r = await fetch(API_BASE + path);
   if (!r.ok) throw new Error(`API error ${r.status}`);
   return r.json();
 }
@@ -43,12 +45,15 @@ function toast(msg) {
   const el=$('toast'); el.textContent=msg; el.classList.remove('hidden');
   clearTimeout(el._t); el._t=setTimeout(()=>el.classList.add('hidden'),2500);
 }
-function save() {
-  if (!currentUser) return;
-  const pfx = 'nx_' + currentUser.email + '_';
-  localStorage.setItem(pfx + 'liked', JSON.stringify(S.liked));
-  localStorage.setItem(pfx + 'playlists', JSON.stringify(S.playlists));
-  localStorage.setItem(pfx + 'recent', JSON.stringify(S.recent));
+async function save() {
+  if (!currentUser || !window.sb) return;
+  try {
+    await window.sb.from('profiles').update({
+      liked: S.liked,
+      playlists: S.playlists,
+      recent: S.recent
+    }).eq('email', currentUser.email);
+  } catch(e) { console.error('Save error', e); }
 }
 
 // ── YouTube scraper result → track ───────────────────────────────────────────
@@ -348,22 +353,31 @@ document.addEventListener('keydown',e=>{
   if(e.code==='ArrowLeft')  prevTrack();
 });
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
+// ── Auth & Supabase ───────────────────────────────────────────────────────────
+const supabaseUrl = 'https://tzqbecfsgsevayycmgcv.supabase.co';
+const supabaseKey = 'sb_publishable_R8HCtLEznIitLNT9_M85TQ_i_uMeoBl';
+window.sb = window.supabase.createClient(supabaseUrl, supabaseKey);
+
 let currentUser = JSON.parse(localStorage.getItem('nx_currentUser') || 'null');
-let users = JSON.parse(localStorage.getItem('nx_users') || '[]');
 const authModal = $('auth-modal');
 const authForm = $('auth-form');
 let authMode = 'login';
 
-function loadUserState() {
+async function loadUserState() {
   if (!currentUser) return;
-  const pfx = 'nx_' + currentUser.email + '_';
-  S.liked = JSON.parse(localStorage.getItem(pfx + 'liked') || '[]');
-  S.playlists = JSON.parse(localStorage.getItem(pfx + 'playlists') || '[]');
-  S.recent = JSON.parse(localStorage.getItem(pfx + 'recent') || '[]');
+  try {
+    const { data, error } = await window.sb.from('profiles').select('*').eq('email', currentUser.email).single();
+    if (data) {
+      S.liked = data.liked || [];
+      S.playlists = data.playlists || [];
+      S.recent = data.recent || [];
+    } else {
+      S.liked = []; S.playlists = []; S.recent = [];
+    }
+  } catch(e) { console.error(e); }
 }
 
-function initAuth() {
+async function initAuth() {
   if (!currentUser) {
     authModal.classList.remove('hidden');
     $('app').style.filter = 'blur(5px)';
@@ -374,7 +388,7 @@ function initAuth() {
     $('player-bar').style.filter = 'none';
     $('user-avatar').textContent = currentUser.email[0].toUpperCase();
     $('account-email').textContent = currentUser.email;
-    loadUserState();
+    await loadUserState();
     renderHome();
     renderSidebar();
     $('liked-count').textContent = `${S.liked.length} songs`;
@@ -388,24 +402,47 @@ $('btn-auth-toggle').addEventListener('click', () => {
   $('btn-auth-toggle').textContent = authMode === 'login' ? 'Create an account instead' : 'Already have an account? Sign In';
 });
 
-authForm.addEventListener('submit', () => {
+authForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
   const email = $('auth-email').value.trim();
   const pass = $('auth-password').value;
+  $('btn-auth-submit').textContent = 'Loading...';
+  $('btn-auth-submit').disabled = true;
   
   if (authMode === 'signup') {
-    if (users.find(u => u.email === email)) { toast('User already exists', true); return; }
-    users.push({ email, pass });
-    localStorage.setItem('nx_users', JSON.stringify(users));
+    const { data: existing } = await window.sb.from('profiles').select('email').eq('email', email).maybeSingle();
+    if (existing) { 
+      toast('User already exists', true); 
+      $('btn-auth-submit').textContent = 'Sign Up'; 
+      $('btn-auth-submit').disabled = false; 
+      return; 
+    }
+    
+    const { error } = await window.sb.from('profiles').insert([{ email, password: pass }]);
+    if (error) { 
+      toast('Error creating account', true); 
+      $('btn-auth-submit').textContent = 'Sign Up'; 
+      $('btn-auth-submit').disabled = false; 
+      return; 
+    }
+    
     currentUser = { email };
     toast('Account created!');
   } else {
-    const u = users.find(u => u.email === email && u.pass === pass);
-    if (!u) { toast('Invalid credentials', true); return; }
+    const { data: u, error } = await window.sb.from('profiles').select('*').eq('email', email).eq('password', pass).maybeSingle();
+    if (!u || error) { 
+      toast('Invalid credentials', true); 
+      $('btn-auth-submit').textContent = 'Sign In'; 
+      $('btn-auth-submit').disabled = false; 
+      return; 
+    }
+    
     currentUser = { email };
     toast('Signed in successfully');
   }
   
   localStorage.setItem('nx_currentUser', JSON.stringify(currentUser));
+  $('btn-auth-submit').disabled = false;
   initAuth();
 });
 

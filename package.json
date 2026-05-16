@@ -1,0 +1,10 @@
+{
+  "name": "nexomusic",
+  "version": "1.0.0",
+  "description": "NexoMusic Backend Proxy",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
