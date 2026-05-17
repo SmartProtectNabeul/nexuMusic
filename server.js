@@ -128,7 +128,6 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Content-Security-Policy', "upgrade-insecure-requests");
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
