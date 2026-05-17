@@ -32,11 +32,21 @@ window.onYouTubeIframeAPIReady = () => {
 function onYT(e) {
   const P = YT.PlayerState;
   if (e.data === P.ENDED)    { S.repeat ? S.ytPlayer.seekTo(0) : nextTrack(); }
-  if (e.data === P.PLAYING)  { S.playing = true;  updateBtn(); startLoop(); }
-  if (e.data === P.PAUSED || e.data === P.BUFFERING) { S.playing = false; updateBtn(); }
+  if (e.data === P.PLAYING)  { 
+    S.playing = true;  updateBtn(); startLoop(); 
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  }
+  if (e.data === P.PAUSED || e.data === P.BUFFERING) { 
+    S.playing = false; updateBtn(); 
+    if (e.data === P.PAUSED && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  }
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
+const SILENCE = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+const bgAudio = new Audio(SILENCE);
+bgAudio.loop = true;
+
 const $ = id => document.getElementById(id);
 const fmt = s => { s=Math.floor(s||0); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
 function decH(str) { const t=document.createElement('textarea'); t.innerHTML=str; return t.value; }
@@ -160,6 +170,7 @@ function playTrack(t) {
   if(!t||!S.ytReady) return;
   S.current=t; S.ytPlayer.loadVideoById(t.id); S.playing=true;
   updateNP(); updateBtn(); addRecent(t); highlightQ();
+  bgAudio.play().catch(()=>{});
 }
 function updateNP() {
   const t=S.current; if(!t) return;
@@ -167,6 +178,18 @@ function updateNP() {
   $('np-thumb').innerHTML=t.thumb?`<img src="${t.thumb}" alt="">`:'♪';
   $('btn-like-player').classList.toggle('liked',S.liked.some(l=>l.id===t.id));
   document.title=`${t.title} — NexoMusic`;
+
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: t.title,
+      artist: t.artist,
+      artwork: [{ src: t.thumb || '', sizes: '512x512', type: 'image/jpeg' }]
+    });
+    navigator.mediaSession.setActionHandler('play', () => { if(S.ytReady) S.ytPlayer.playVideo(); });
+    navigator.mediaSession.setActionHandler('pause', () => { if(S.ytReady) S.ytPlayer.pauseVideo(); });
+    navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
+    navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
+  }
 }
 function updateBtn(){ $('icon-play').classList.toggle('hidden',S.playing); $('icon-pause').classList.toggle('hidden',!S.playing); }
 $('btn-play-pause').addEventListener('click',()=>{ if(!S.ytReady) return; S.playing?S.ytPlayer.pauseVideo():S.ytPlayer.playVideo(); });
@@ -188,28 +211,79 @@ $('btn-repeat').addEventListener('click',function(){S.repeat=!S.repeat;this.clas
 
 // ── Progress ──────────────────────────────────────────────────────────────────
 let loopId;
+let isDraggingProgress = false;
+
+function updateProgressUI(pct, cur, dur) {
+  $('progress-fill').style.width=pct+'%'; $('progress-thumb').style.left=pct+'%';
+  if (cur !== undefined) $('time-current').textContent=fmt(cur);
+  if (dur !== undefined) $('time-total').textContent=fmt(dur);
+}
+
 function startLoop() {
   clearInterval(loopId);
   loopId=setInterval(()=>{
-    if(!S.ytReady||!S.playing) return;
+    if(!S.ytReady||!S.playing||isDraggingProgress) return;
     const cur=S.ytPlayer.getCurrentTime()||0, dur=S.ytPlayer.getDuration()||0;
     if(!dur) return;
-    const pct=(cur/dur)*100;
-    $('progress-fill').style.width=pct+'%'; $('progress-thumb').style.left=pct+'%';
-    $('time-current').textContent=fmt(cur); $('time-total').textContent=fmt(dur);
-  },500);
+    updateProgressUI((cur/dur)*100, cur, dur);
+  }, 100); // 100ms for smoother updates
 }
-$('progress-bar').addEventListener('click',e=>{
+
+function handleProgressDrag(e) {
   const r=$('progress-bar').getBoundingClientRect();
-  if(S.ytReady) S.ytPlayer.seekTo(((e.clientX-r.left)/r.width)*(S.ytPlayer.getDuration()||0));
+  let pct = (e.clientX-r.left)/r.width;
+  pct = Math.max(0, Math.min(1, pct));
+  const dur = S.ytPlayer?.getDuration()||0;
+  updateProgressUI(pct*100, pct*dur, dur);
+  return pct;
+}
+
+$('progress-bar').addEventListener('pointerdown', e => {
+  if (!S.ytReady) return;
+  isDraggingProgress = true;
+  $('progress-bar').setPointerCapture(e.pointerId);
+  handleProgressDrag(e);
+});
+$('progress-bar').addEventListener('pointermove', e => {
+  if (isDraggingProgress) handleProgressDrag(e);
+});
+$('progress-bar').addEventListener('pointerup', e => {
+  if (!isDraggingProgress) return;
+  isDraggingProgress = false;
+  $('progress-bar').releasePointerCapture(e.pointerId);
+  const pct = handleProgressDrag(e);
+  if(S.ytReady) S.ytPlayer.seekTo(pct * (S.ytPlayer.getDuration()||0));
 });
 
 // ── Volume ────────────────────────────────────────────────────────────────────
+let isDraggingVolume = false;
+
 function ytVol(v) {
   S.volume=Math.max(0,Math.min(100,v)); if(S.ytReady) S.ytPlayer.setVolume(S.volume);
   $('volume-fill').style.width=S.volume+'%'; $('volume-thumb').style.left=S.volume+'%';
 }
-$('volume-bar').addEventListener('click',e=>{ const r=$('volume-bar').getBoundingClientRect(); ytVol(((e.clientX-r.left)/r.width)*100); });
+
+function handleVolumeDrag(e) {
+  const r=$('volume-bar').getBoundingClientRect();
+  let pct = (e.clientX-r.left)/r.width;
+  ytVol(pct * 100);
+}
+
+$('volume-bar').addEventListener('pointerdown', e => {
+  isDraggingVolume = true;
+  $('volume-bar').setPointerCapture(e.pointerId);
+  handleVolumeDrag(e);
+});
+$('volume-bar').addEventListener('pointermove', e => {
+  if (isDraggingVolume) handleVolumeDrag(e);
+});
+$('volume-bar').addEventListener('pointerup', e => {
+  if (!isDraggingVolume) return;
+  isDraggingVolume = false;
+  $('volume-bar').releasePointerCapture(e.pointerId);
+  handleVolumeDrag(e);
+});
+
 $('btn-mute').addEventListener('click',()=>{
   S.muted=!S.muted; S.ytReady&&(S.muted?S.ytPlayer.mute():S.ytPlayer.unMute());
   $('icon-volume').classList.toggle('hidden',S.muted); $('icon-muted').classList.toggle('hidden',!S.muted);
