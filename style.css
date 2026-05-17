@@ -234,7 +234,7 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
   .player-right { display: none; }
 }
 @media (max-width: 600px) {
-  .app { grid-template-columns: 1fr; height: calc(100vh - 224px); }
+  .app { grid-template-columns: 1fr; height: calc(100vh - 200px); }
   .sidebar { display: none; }
   
   .tracks-row { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
@@ -279,9 +279,7 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
   
   .progress-bar-container { display: flex; width: 100%; }
   
-  .player-right { display: flex; justify-content: center; width: 100%; padding-top: 4px; }
-  .volume-control { display: flex; width: 150px; }
-  .volume-bar { width: 100%; }
+  .player-right { display: none; }
   
   .views-container { padding: 0 16px 24px; }
   .topbar { padding: 16px; gap: 10px; }
