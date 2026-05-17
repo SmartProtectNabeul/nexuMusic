@@ -121,7 +121,15 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://localhost:${PORT}`);
   const p = u.pathname;
 
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Content-Security-Policy', "upgrade-insecure-requests");
+
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const json = (data, code=200) => {
@@ -129,10 +137,25 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   };
 
+  // ── Simple Rate Limiting ─────────────────────────────────────────────────
+  const ip = req.socket.remoteAddress;
+  if (!global.rateLimit) global.rateLimit = new Map();
+  const now = Date.now();
+  const rl = global.rateLimit.get(ip) || { count: 0, time: now };
+  if (now - rl.time > 60000) { rl.count = 0; rl.time = now; } // Reset every minute
+  rl.count++;
+  global.rateLimit.set(ip, rl);
+
+  if (rl.count > 50) { // Max 50 requests per minute per IP
+    return json({ error: 'Too many requests. Please try again later.' }, 429);
+  }
+
   // ── /api/search?q=... ────────────────────────────────────────────────────
   if (p === '/api/search') {
     const q = u.searchParams.get('q') || '';
-    if (!q) { json([]); return; }
+    if (!q || q.length > 100) { 
+      return json({ error: 'Invalid search query.' }, 400); 
+    }
     try {
       console.log(`[search] "${q}"`);
       const results = await ytSearch(q);

@@ -410,28 +410,23 @@ authForm.addEventListener('submit', async (e) => {
   $('btn-auth-submit').disabled = true;
   
   if (authMode === 'signup') {
-    const { data: existing } = await window.sb.from('profiles').select('email').eq('email', email).maybeSingle();
-    if (existing) { 
-      toast('User already exists', true); 
+    const { data, error } = await window.sb.auth.signUp({ email, password: pass });
+    if (error) { 
+      toast(error.message || 'Error creating account', true); 
       $('btn-auth-submit').textContent = 'Sign Up'; 
       $('btn-auth-submit').disabled = false; 
       return; 
     }
     
-    const { error } = await window.sb.from('profiles').insert([{ email, password: pass }]);
-    if (error) { 
-      toast('Error creating account', true); 
-      $('btn-auth-submit').textContent = 'Sign Up'; 
-      $('btn-auth-submit').disabled = false; 
-      return; 
-    }
+    // Initialize empty profile using email to maintain backward compatibility
+    await window.sb.from('profiles').upsert([{ email, liked: [], playlists: [], recent: [] }]);
     
     currentUser = { email };
     toast('Account created!');
   } else {
-    const { data: u, error } = await window.sb.from('profiles').select('*').eq('email', email).eq('password', pass).maybeSingle();
-    if (!u || error) { 
-      toast('Invalid credentials', true); 
+    const { data, error } = await window.sb.auth.signInWithPassword({ email, password: pass });
+    if (error) { 
+      toast(error.message || 'Invalid credentials', true); 
       $('btn-auth-submit').textContent = 'Sign In'; 
       $('btn-auth-submit').disabled = false; 
       return; 
@@ -456,7 +451,8 @@ document.addEventListener('click', e => {
   }
 });
 
-$('btn-logout').addEventListener('click', () => {
+$('btn-logout').addEventListener('click', async () => {
+  await window.sb.auth.signOut();
   currentUser = null;
   localStorage.removeItem('nx_currentUser');
   S.liked = []; S.playlists = []; S.recent = []; S.queue = [];
