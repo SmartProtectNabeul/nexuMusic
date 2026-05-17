@@ -234,7 +234,7 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
   .player-right { display: none; }
 }
 @media (max-width: 600px) {
-  .app { grid-template-columns: 1fr; height: calc(100vh - 130px); }
+  .app { grid-template-columns: 1fr; height: calc(100vh - 224px); }
   .sidebar { display: none; }
   
   .tracks-row { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
@@ -257,25 +257,31 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
   .mobile-nav-item.active svg { stroke: var(--text-primary); }
   
   .player-bar { 
-    bottom: 74px; height: 56px; padding: 0 12px; 
-    grid-template-columns: 1fr auto; gap: 10px;
-    background: var(--bg-surface); border: 1px solid var(--border);
-    box-shadow: 0 4px 20px rgba(0,0,0,0.5); margin: 0 10px; border-radius: 8px;
+    bottom: 64px; height: auto; padding: 12px; 
+    display: flex; flex-direction: column; gap: 12px;
+    background: var(--bg-surface); border-top: 1px solid var(--border); border-radius: 0;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.5); margin: 0;
   }
-  .now-playing { display: flex; }
+  .now-playing { display: flex; width: 100%; align-items: center; }
   .np-thumb { width: 40px; height: 40px; border-radius: 4px; }
+  .np-info { margin: 0 10px; flex: 1; overflow: hidden; }
   .np-title { font-size: 13px; font-weight: 600; }
   .np-artist { font-size: 12px; }
-  .btn-like-player { display: none; }
+  .btn-like-player { display: block; }
   
-  .player-controls { flex-direction: row; align-items: center; justify-content: flex-end; width: auto; }
-  .control-buttons { gap: 10px; }
-  #btn-shuffle, #btn-prev, #btn-next, #btn-repeat { display: none; }
-  .btn-play-main { width: 36px; height: 36px; background: transparent; }
-  .btn-play-main svg { fill: var(--text-primary); width: 20px; height: 20px; }
-  .btn-play-main:hover { background: transparent; transform: scale(1.1); }
+  .player-controls { flex-direction: column; align-items: center; justify-content: center; width: 100%; gap: 10px; }
+  .control-buttons { gap: 16px; justify-content: center; width: 100%; }
+  #btn-shuffle, #btn-repeat { display: none; }
+  #btn-prev, #btn-next { display: flex; }
+  .btn-play-main { width: 40px; height: 40px; background: var(--text-primary); }
+  .btn-play-main svg { fill: #000; width: 18px; height: 18px; }
+  .btn-play-main:hover { background: var(--accent-hover); transform: scale(1.06); }
   
-  .progress-bar-container, .player-right { display: none; }
+  .progress-bar-container { display: flex; width: 100%; }
+  
+  .player-right { display: flex; justify-content: center; width: 100%; padding-top: 4px; }
+  .volume-control { display: flex; width: 150px; }
+  .volume-bar { width: 100%; }
   
   .views-container { padding: 0 16px 24px; }
   .topbar { padding: 16px; gap: 10px; }
