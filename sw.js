@@ -1,11 +1,12 @@
-const CACHE_NAME = 'nexomusic-v2';
+const CACHE_NAME = 'nexomusic-v3';
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.json',
-  './logo.png'
+  './logo.png',
+  './silence.wav'
 ];
 
 self.addEventListener('install', event => {

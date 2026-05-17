@@ -57,21 +57,8 @@ function updateMediaPosition() {
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
-function getSilenceURL() {
-  const sr = 44100, len = sr * 2; // 2 seconds
-  const buf = new ArrayBuffer(44 + len * 2);
-  const v = new DataView(buf);
-  const ws = (o, s) => { for(let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
-  ws(0, 'RIFF'); v.setUint32(4, 36 + len * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ');
-  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
-  v.setUint16(34, 16, true); ws(36, 'data'); v.setUint32(40, len * 2, true);
-  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
-}
-const bgAudio = new Audio(getSilenceURL());
-bgAudio.loop = true;
-
 const $ = id => document.getElementById(id);
+const bgAudio = $('bg-audio');
 const fmt = s => { s=Math.floor(s||0); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
 function decH(str) { const t=document.createElement('textarea'); t.innerHTML=str; return t.value; }
 function thumbHTML(t) { return t.thumb ? `<img src="${t.thumb}" alt="" loading="lazy">` : '♪'; }
@@ -215,6 +202,13 @@ function updateNP() {
     navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
     navigator.mediaSession.setActionHandler('seekto', (d) => {
       if(S.ytReady && d.seekTime !== undefined) { S.ytPlayer.seekTo(d.seekTime); updateMediaPosition(); }
+    });
+    navigator.mediaSession.setActionHandler('stop', () => {
+      if(S.ytReady) S.ytPlayer.pauseVideo();
+      if(bgAudio) bgAudio.pause();
+      navigator.mediaSession.playbackState = 'none';
+      S.playing = false;
+      updateBtn();
     });
   }
 }
