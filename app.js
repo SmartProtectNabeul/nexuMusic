@@ -67,6 +67,7 @@ offAudio.addEventListener('play', () => {
 offAudio.addEventListener('pause', () => { 
   S.playing = false; updateBtn(); 
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  if(typeof savePlaybackState === 'function') savePlaybackState();
 });
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
@@ -670,5 +671,47 @@ $('btn-logout').addEventListener('click', () => {
   initAuth();
 });
 
+// ── Persistence ───────────────────────────────────────────────────────────────
+function savePlaybackState() {
+  if (!S.current) return;
+  localStorage.setItem('nx_playbackState', JSON.stringify({
+    queue: S.queue, queueIdx: S.queueIdx,
+    current: S.current, time: offAudio.currentTime || 0, volume: S.volume
+  }));
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') savePlaybackState(); });
+window.addEventListener('beforeunload', savePlaybackState);
+setInterval(savePlaybackState, 5000);
+
+function loadPlaybackState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('nx_playbackState'));
+    if (!saved || !saved.current) return;
+    
+    S.queue = saved.queue || [];
+    S.queueIdx = saved.queueIdx || 0;
+    S.volume = saved.volume ?? 80;
+    ytVol(S.volume);
+    
+    S.current = saved.current;
+    isOfflineMode = true;
+    
+    getOfflineAudio(S.current.id).then(blob => {
+      offAudio.src = blob ? URL.createObjectURL(blob) : `${API_BASE}/api/stream?id=${S.current.id}`;
+      const onMeta = () => {
+        offAudio.currentTime = saved.time || 0;
+        updateProgressUI(((saved.time||0)/(offAudio.duration||1))*100, saved.time, offAudio.duration);
+        offAudio.removeEventListener('loadedmetadata', onMeta);
+      };
+      offAudio.addEventListener('loadedmetadata', onMeta);
+      
+      offAudio.pause();
+      S.playing = false;
+      updateNP(); updateBtn(); renderQueue(); highlightQ();
+    });
+  } catch(e) {}
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 initAuth();
+loadPlaybackState();
