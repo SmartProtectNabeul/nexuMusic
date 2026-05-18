@@ -57,6 +57,12 @@ function updateMediaPosition() {
   }
 }
 
+// ── Utils ─────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const bgAudio = $('bg-audio');
+const offAudio = $('offline-audio');
+let isOfflineMode = false;
+
 offAudio.addEventListener('ended', () => { S.repeat ? offAudio.play() : nextTrack(); });
 offAudio.addEventListener('play', () => { 
   S.playing = true; updateBtn(); startLoop(); 
@@ -69,12 +75,6 @@ offAudio.addEventListener('pause', () => {
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   if(typeof savePlaybackState === 'function') savePlaybackState();
 });
-
-// ── Utils ─────────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-const bgAudio = $('bg-audio');
-const offAudio = $('offline-audio');
-let isOfflineMode = false;
 
 const DB_NAME = 'NexoOfflineDB', DB_VER = 1;
 let offlineDB;
