@@ -214,6 +214,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/api/log') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => { console.log('\n--- BROWSER ERROR ---\n', body, '\n-------------------\n'); res.end(); });
+    return;
+  }
+
   // ── Static files ─────────────────────────────────────────────────────────
   const filePath = path.join(DIR, p === '/' ? 'index.html' : p);
   const ext = path.extname(filePath);

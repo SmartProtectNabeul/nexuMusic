@@ -575,7 +575,8 @@ async function loadUserState() {
 }
 
 async function initAuth() {
-  if (!currentUser) {
+  if (!currentUser || !currentUser.email) {
+    currentUser = null;
     authModal.classList.remove('hidden');
     $('app').style.filter = 'blur(5px)';
     $('player-bar').style.filter = 'blur(5px)';

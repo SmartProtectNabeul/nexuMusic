@@ -13,6 +13,10 @@
   <link rel="apple-touch-icon" href="logo.png" />
   <meta name="theme-color" content="#1a8fff" />
   <link rel="icon" href="logo.png" type="image/x-icon" />
+  <script>
+    window.onerror = function(msg, url, line, col, err) { fetch('http://localhost:3000/api/log', { method: 'POST', body: JSON.stringify({msg, line, col, err: err ? err.stack : ''}) }); };
+    window.addEventListener('unhandledrejection', function(e) { fetch('http://localhost:3000/api/log', { method: 'POST', body: JSON.stringify({msg: e.reason ? e.reason.message : 'unhandled rejection', stack: e.reason ? e.reason.stack : ''}) }); });
+  </script>
 </head>
 <body>
 
