@@ -181,6 +181,39 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── /api/download ────────────────────────────────────────────────────────
+  if (p === '/api/download') {
+    const id = u.searchParams.get('id');
+    if (!id) return json({ error: 'Missing id' }, 400);
+    try {
+      const ytdl = require('@distube/ytdl-core');
+      res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Content-Disposition': `attachment; filename="${id}.mp3"`
+      });
+      ytdl(`https://www.youtube.com/watch?v=${id}`, { filter: 'audioonly', quality: 'highestaudio' }).pipe(res);
+    } catch(err) {
+      console.error('[download] error:', err.message);
+      if (!res.headersSent) res.end();
+    }
+    return;
+  }
+
+  // ── /api/stream ──────────────────────────────────────────────────────────
+  if (p === '/api/stream') {
+    const id = u.searchParams.get('id');
+    if (!id) return json({ error: 'Missing id' }, 400);
+    try {
+      const ytdl = require('@distube/ytdl-core');
+      res.writeHead(200, { 'Content-Type': 'audio/webm' });
+      ytdl(`https://www.youtube.com/watch?v=${id}`, { filter: 'audioonly', quality: 'highestaudio' }).pipe(res);
+    } catch(err) {
+      console.error('[stream] error:', err.message);
+      if (!res.headersSent) res.end();
+    }
+    return;
+  }
+
   // ── Static files ─────────────────────────────────────────────────────────
   const filePath = path.join(DIR, p === '/' ? 'index.html' : p);
   const ext = path.extname(filePath);

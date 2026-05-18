@@ -47,18 +47,63 @@ function onYT(e) {
 }
 
 function updateMediaPosition() {
-  if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && S.ytReady) {
+  if ('mediaSession' in navigator && navigator.mediaSession.setPositionState) {
     try {
-      const dur = S.ytPlayer.getDuration()||0;
-      const cur = S.ytPlayer.getCurrentTime()||0;
+      let dur=0, cur=0;
+      if (isOfflineMode) { dur = offAudio.duration||0; cur = offAudio.currentTime||0; }
+      else if (S.ytReady) { dur = S.ytPlayer.getDuration()||0; cur = S.ytPlayer.getCurrentTime()||0; }
       if (dur > 0) navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: cur });
     } catch(e) {}
   }
 }
 
+offAudio.addEventListener('ended', () => { S.repeat ? offAudio.play() : nextTrack(); });
+offAudio.addEventListener('play', () => { 
+  S.playing = true; updateBtn(); startLoop(); 
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  updateMediaPosition(); 
+  bgAudio.play().catch(()=>{}); 
+});
+offAudio.addEventListener('pause', () => { 
+  S.playing = false; updateBtn(); 
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+});
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const bgAudio = $('bg-audio');
+const offAudio = $('offline-audio');
+let isOfflineMode = false;
+
+const DB_NAME = 'NexoOfflineDB', DB_VER = 1;
+let offlineDB;
+function initOfflineDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VER);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('tracks', { keyPath: 'id' });
+    req.onsuccess = e => { offlineDB = e.target.result; resolve(); };
+    req.onerror = e => reject(e);
+  });
+}
+async function saveOfflineAudio(id, blob) {
+  if(!offlineDB) await initOfflineDB();
+  const tx = offlineDB.transaction('tracks', 'readwrite');
+  tx.objectStore('tracks').put({ id, blob });
+}
+async function getOfflineAudio(id) {
+  if(!offlineDB) await initOfflineDB();
+  return new Promise(resolve => {
+    const req = offlineDB.transaction('tracks', 'readonly').objectStore('tracks').get(id);
+    req.onsuccess = () => resolve(req.result ? req.result.blob : null);
+    req.onerror = () => resolve(null);
+  });
+}
+async function deleteOfflineAudio(id) {
+  if(!offlineDB) await initOfflineDB();
+  const tx = offlineDB.transaction('tracks', 'readwrite');
+  tx.objectStore('tracks').delete(id);
+}
+
 const fmt = s => { s=Math.floor(s||0); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
 function decH(str) { const t=document.createElement('textarea'); t.innerHTML=str; return t.value; }
 function thumbHTML(t) { return t.thumb ? `<img src="${t.thumb}" alt="" loading="lazy">` : '♪'; }
@@ -177,12 +222,27 @@ function renderList(container, tracks, queue) {
 
 // ── Playback ──────────────────────────────────────────────────────────────────
 function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S.queue[idx]); renderQueue(); }
-function playTrack(t) {
-  if(!t||!S.ytReady) return;
-  S.current=t; S.ytPlayer.loadVideoById(t.id); S.playing=true;
+async function playTrack(t) {
+  if(!t) return;
+  S.current=t; 
+  
+  const blob = await getOfflineAudio(t.id);
+  isOfflineMode = true; // Use native audio for ALL playback to ensure background play!
+  if (S.ytReady) S.ytPlayer.pauseVideo();
+  
+  if (blob) {
+    offAudio.src = URL.createObjectURL(blob);
+  } else {
+    offAudio.src = `${API_BASE}/api/stream?id=${t.id}`;
+  }
+  
+  offAudio.play().catch(e => { console.error('Play error', e); toast('Error playing audio'); });
+  S.playing = true;
+  
   updateNP(); updateBtn(); addRecent(t); highlightQ();
   bgAudio.play().catch(()=>{});
 }
+offAudio.addEventListener('error', () => { toast('Stream error, skipping...'); nextTrack(); });
 function updateNP() {
   const t=S.current; if(!t) return;
   $('np-title').textContent=t.title; $('np-artist').textContent=t.artist;
@@ -196,15 +256,20 @@ function updateNP() {
       artist: t.artist,
       artwork: [{ src: t.thumb || '', sizes: '512x512', type: 'image/jpeg' }]
     });
-    navigator.mediaSession.setActionHandler('play', () => { if(S.ytReady) S.ytPlayer.playVideo(); bgAudio.play().catch(()=>{}); });
-    navigator.mediaSession.setActionHandler('pause', () => { if(S.ytReady) S.ytPlayer.pauseVideo(); });
+    navigator.mediaSession.setActionHandler('play', () => { if(isOfflineMode) offAudio.play(); else if(S.ytReady) S.ytPlayer.playVideo(); bgAudio.play().catch(()=>{}); });
+    navigator.mediaSession.setActionHandler('pause', () => { if(isOfflineMode) offAudio.pause(); else if(S.ytReady) S.ytPlayer.pauseVideo(); });
     navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
     navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
     navigator.mediaSession.setActionHandler('seekto', (d) => {
-      if(S.ytReady && d.seekTime !== undefined) { S.ytPlayer.seekTo(d.seekTime); updateMediaPosition(); }
+      if(d.seekTime !== undefined) { 
+        if(isOfflineMode) offAudio.currentTime = d.seekTime;
+        else if(S.ytReady) S.ytPlayer.seekTo(d.seekTime); 
+        updateMediaPosition(); 
+      }
     });
     navigator.mediaSession.setActionHandler('stop', () => {
-      if(S.ytReady) S.ytPlayer.pauseVideo();
+      if(isOfflineMode) offAudio.pause();
+      else if(S.ytReady) S.ytPlayer.pauseVideo();
       if(bgAudio) bgAudio.pause();
       navigator.mediaSession.playbackState = 'none';
       S.playing = false;
@@ -213,7 +278,11 @@ function updateNP() {
   }
 }
 function updateBtn(){ $('icon-play').classList.toggle('hidden',S.playing); $('icon-pause').classList.toggle('hidden',!S.playing); }
-$('btn-play-pause').addEventListener('click',()=>{ if(!S.ytReady) return; S.playing?S.ytPlayer.pauseVideo():S.ytPlayer.playVideo(); });
+$('btn-play-pause').addEventListener('click',()=>{ 
+  if(!S.ytReady && !isOfflineMode) return; 
+  if (S.playing) { isOfflineMode ? offAudio.pause() : S.ytPlayer.pauseVideo(); }
+  else { isOfflineMode ? offAudio.play() : S.ytPlayer.playVideo(); }
+});
 $('btn-next').addEventListener('click',nextTrack);
 $('btn-prev').addEventListener('click',prevTrack);
 function nextTrack() {
@@ -243,11 +312,17 @@ function updateProgressUI(pct, cur, dur) {
 function startLoop() {
   clearInterval(loopId);
   loopId=setInterval(()=>{
-    if(!S.ytReady||!S.playing||isDraggingProgress) return;
-    const cur=S.ytPlayer.getCurrentTime()||0, dur=S.ytPlayer.getDuration()||0;
+    if(!S.playing||isDraggingProgress) return;
+    let cur = 0, dur = 0;
+    if (isOfflineMode) {
+      cur = offAudio.currentTime; dur = offAudio.duration;
+    } else {
+      if(!S.ytReady) return;
+      cur=S.ytPlayer.getCurrentTime()||0; dur=S.ytPlayer.getDuration()||0;
+    }
     if(!dur) return;
     updateProgressUI((cur/dur)*100, cur, dur);
-  }, 100); // 100ms for smoother updates
+  }, 100);
 }
 
 function handleProgressDrag(e) {
@@ -273,7 +348,10 @@ $('progress-bar').addEventListener('pointerup', e => {
   isDraggingProgress = false;
   $('progress-bar').releasePointerCapture(e.pointerId);
   const pct = handleProgressDrag(e);
-  if(S.ytReady) {
+  if (isOfflineMode) {
+    offAudio.currentTime = pct * (offAudio.duration||0);
+    setTimeout(updateMediaPosition, 200);
+  } else if(S.ytReady) {
     S.ytPlayer.seekTo(pct * (S.ytPlayer.getDuration()||0));
     setTimeout(updateMediaPosition, 200);
   }
@@ -283,7 +361,9 @@ $('progress-bar').addEventListener('pointerup', e => {
 let isDraggingVolume = false;
 
 function ytVol(v) {
-  S.volume=Math.max(0,Math.min(100,v)); if(S.ytReady) S.ytPlayer.setVolume(S.volume);
+  S.volume=Math.max(0,Math.min(100,v)); 
+  if(S.ytReady) S.ytPlayer.setVolume(S.volume);
+  offAudio.volume = S.volume / 100;
   $('volume-fill').style.width=S.volume+'%'; $('volume-thumb').style.left=S.volume+'%';
 }
 
@@ -309,18 +389,36 @@ $('volume-bar').addEventListener('pointerup', e => {
 });
 
 $('btn-mute').addEventListener('click',()=>{
-  S.muted=!S.muted; S.ytReady&&(S.muted?S.ytPlayer.mute():S.ytPlayer.unMute());
+  S.muted=!S.muted; 
+  S.ytReady&&(S.muted?S.ytPlayer.mute():S.ytPlayer.unMute());
+  offAudio.muted = S.muted;
   $('icon-volume').classList.toggle('hidden',S.muted); $('icon-muted').classList.toggle('hidden',!S.muted);
 });
 
 // ── Like ──────────────────────────────────────────────────────────────────────
-function toggleLike(t, btn) {
+async function toggleLike(t, btn) {
   const idx=S.liked.findIndex(l=>l.id===t.id);
-  idx>-1?S.liked.splice(idx,1):S.liked.unshift(t);
+  if(idx>-1){
+    S.liked.splice(idx,1);
+    deleteOfflineAudio(t.id);
+    toast('Removed from Liked');
+  } else {
+    S.liked.unshift(t);
+    toast('Added to Liked ❤. Downloading...');
+    try {
+      const res = await fetch(`/api/download?id=${t.id}`);
+      if(res.ok) {
+        const blob = await res.blob();
+        await saveOfflineAudio(t.id, blob);
+        toast('Saved for offline listening');
+      } else {
+        toast('Failed to download', true);
+      }
+    } catch(e) { console.error('offline err', e); }
+  }
   save(); $('liked-count').textContent=`${S.liked.length} songs`;
   if(btn) btn.classList.toggle('liked',idx===-1);
   if(S.current?.id===t.id) $('btn-like-player').classList.toggle('liked',idx===-1);
-  toast(idx>-1?'Removed from Liked':'Added to Liked ❤');
 }
 $('btn-like-player').addEventListener('click',()=>{ if(S.current) toggleLike(S.current,null); });
 
