@@ -218,14 +218,39 @@ const server = http.createServer(async (req, res) => {
         }, res => { let d=''; res.on('data', c => d+=c); res.on('end', () => resolve(d)); }).on('error', reject);
       });
 
-      // Extract ytInitialPlayerResponse from the page
-      const match = playerResp.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
-      if (!match) return json({ error: 'Could not extract player data' }, 502);
-      const playerData = JSON.parse(match[1]);
-      const formats = playerData?.streamingData?.adaptiveFormats || playerData?.streamingData?.formats || [];
-      // Pick best audio-only format
-      const audioFmt = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url).sort((a,b) => (b.bitrate||0)-(a.bitrate||0))[0];
-      if (!audioFmt) return json({ error: 'No audio stream found' }, 404);
+      // Extract ytInitialPlayerResponse from the page using brace counting
+      // (a non-greedy regex fails on large nested JSON objects)
+      const startToken = 'ytInitialPlayerResponse=';
+      const startIdx = playerResp.indexOf(startToken);
+      if (startIdx === -1) return json({ error: 'Could not find player data on page' }, 502);
+
+      let jsonStart = playerResp.indexOf('{', startIdx + startToken.length);
+      if (jsonStart === -1) return json({ error: 'Could not find JSON start' }, 502);
+
+      let depth = 0, jsonEnd = -1;
+      for (let i = jsonStart; i < playerResp.length; i++) {
+        if (playerResp[i] === '{') depth++;
+        else if (playerResp[i] === '}') { depth--; if (depth === 0) { jsonEnd = i; break; } }
+      }
+      if (jsonEnd === -1) return json({ error: 'Could not find JSON end' }, 502);
+
+      let playerData;
+      try { playerData = JSON.parse(playerResp.slice(jsonStart, jsonEnd + 1)); }
+      catch(pe) { console.error('[stream] JSON parse error:', pe.message); return json({ error: 'Failed to parse player data' }, 502); }
+
+      const formats = [
+        ...(playerData?.streamingData?.adaptiveFormats || []),
+        ...(playerData?.streamingData?.formats || [])
+      ];
+      // Pick best audio-only format that has a direct URL (not cipher-encrypted)
+      const audioFmt = formats
+        .filter(f => f.mimeType?.startsWith('audio/') && f.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      if (!audioFmt) {
+        console.error('[stream] No playable audio format found. formats count:', formats.length);
+        return json({ error: 'No audio stream found' }, 404);
+      }
+      console.log(`[stream] → ${audioFmt.mimeType} @ ${audioFmt.bitrate}bps`);
       return json({ url: audioFmt.url, mimeType: audioFmt.mimeType });
     } catch(err) {
       console.error('[stream] error:', err.message);

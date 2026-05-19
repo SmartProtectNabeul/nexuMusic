@@ -225,34 +225,28 @@ function renderList(container, tracks, queue) {
 function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S.queue[idx]); renderQueue(); }
 async function playTrack(t) {
   if(!t) return;
-  S.current=t;
-  isOfflineMode = true;
+  S.current = t;
+
+  // Stop whatever is currently playing
+  offAudio.pause();
   if (S.ytReady) S.ytPlayer.pauseVideo();
 
   const blob = await getOfflineAudio(t.id);
   if (blob) {
+    // ── Offline / downloaded track → use HTML <audio> ───────────────────────
+    isOfflineMode = true;
     offAudio.src = URL.createObjectURL(blob);
+    offAudio.play().catch(e => { console.error('Play error', e); });
+    S.playing = true;
+    bgAudio.play().catch(()=>{});
   } else {
-    try {
-      const streamRes = await fetch(`${API_BASE}/api/stream?id=${t.id}`);
-      if (!streamRes.ok) throw new Error('stream fetch failed');
-      const streamData = await streamRes.json();
-      if (!streamData.url) throw new Error('no url in stream response');
-      offAudio.src = streamData.url;
-    } catch(e) {
-      console.warn('Stream failed, falling back to YouTube IFrame:', e.message);
-      isOfflineMode = false;
-      if (S.ytReady) { S.ytPlayer.loadVideoById(t.id); S.playing = true; }
-      updateNP(); updateBtn(); addRecent(t); highlightQ();
-      bgAudio.play().catch(()=>{});
-      return;
-    }
+    // ── Not downloaded → go straight to YouTube IFrame (no /api/stream call) ─
+    isOfflineMode = false;
+    if (S.ytReady) { S.ytPlayer.loadVideoById(t.id); S.playing = true; }
+    bgAudio.play().catch(()=>{});
   }
 
-  offAudio.play().catch(e => { console.error('Play error', e); });
-  S.playing = true;
   updateNP(); updateBtn(); addRecent(t); highlightQ();
-  bgAudio.play().catch(()=>{});
 }
 
 let _audioErrorCount = 0;
@@ -299,10 +293,10 @@ function updateNP() {
   }
 }
 function updateBtn(){ $('icon-play').classList.toggle('hidden',S.playing); $('icon-pause').classList.toggle('hidden',!S.playing); }
-$('btn-play-pause').addEventListener('click',()=>{ 
-  if(!S.ytReady && !isOfflineMode) return; 
-  if (S.playing) { isOfflineMode ? offAudio.pause() : S.ytPlayer.pauseVideo(); }
-  else { isOfflineMode ? offAudio.play() : S.ytPlayer.playVideo(); }
+$('btn-play-pause').addEventListener('click',()=>{
+  if(!S.current) return; // nothing loaded yet
+  if (S.playing) { isOfflineMode ? offAudio.pause() : S.ytPlayer?.pauseVideo(); }
+  else           { isOfflineMode ? offAudio.play()  : S.ytPlayer?.playVideo();  }
 });
 $('btn-next').addEventListener('click',nextTrack);
 $('btn-prev').addEventListener('click',prevTrack);
@@ -313,7 +307,8 @@ function nextTrack() {
 }
 function prevTrack() {
   if(!S.queue.length) return;
-  if((S.ytPlayer?.getCurrentTime()||0)>3){S.ytPlayer.seekTo(0);return;}
+  const curTime = isOfflineMode ? offAudio.currentTime : (S.ytPlayer?.getCurrentTime()||0);
+  if(curTime > 3) { isOfflineMode ? (offAudio.currentTime=0) : S.ytPlayer?.seekTo(0); return; }
   S.queueIdx=(S.queueIdx-1+S.queue.length)%S.queue.length;
   playTrack(S.queue[S.queueIdx]);
 }
@@ -346,17 +341,21 @@ function startLoop() {
   }, 100);
 }
 
+function getDuration() {
+  return isOfflineMode ? (offAudio.duration || 0) : (S.ytPlayer?.getDuration() || 0);
+}
+
 function handleProgressDrag(e) {
   const r=$('progress-bar').getBoundingClientRect();
   let pct = (e.clientX-r.left)/r.width;
   pct = Math.max(0, Math.min(1, pct));
-  const dur = S.ytPlayer?.getDuration()||0;
+  const dur = getDuration();
   updateProgressUI(pct*100, pct*dur, dur);
   return pct;
 }
 
 $('progress-bar').addEventListener('pointerdown', e => {
-  if (!S.ytReady) return;
+  if (!S.current) return;
   isDraggingProgress = true;
   $('progress-bar').setPointerCapture(e.pointerId);
   handleProgressDrag(e);
@@ -370,10 +369,10 @@ $('progress-bar').addEventListener('pointerup', e => {
   $('progress-bar').releasePointerCapture(e.pointerId);
   const pct = handleProgressDrag(e);
   if (isOfflineMode) {
-    offAudio.currentTime = pct * (offAudio.duration||0);
+    offAudio.currentTime = pct * (offAudio.duration || 0);
     setTimeout(updateMediaPosition, 200);
-  } else if(S.ytReady) {
-    S.ytPlayer.seekTo(pct * (S.ytPlayer.getDuration()||0));
+  } else if (S.ytReady) {
+    S.ytPlayer.seekTo(pct * (S.ytPlayer.getDuration() || 0));
     setTimeout(updateMediaPosition, 200);
   }
 });
@@ -427,7 +426,7 @@ async function toggleLike(t, btn) {
     S.liked.unshift(t);
     toast('Added to Liked ❤. Downloading...');
     try {
-      const res = await fetch(`/api/download?id=${t.id}`);
+      const res = await fetch(`${API_BASE}/api/download?id=${t.id}`);
       if(res.ok) {
         const blob = await res.blob();
         await saveOfflineAudio(t.id, blob);
@@ -709,37 +708,42 @@ function loadPlaybackState() {
     const saved = JSON.parse(localStorage.getItem('nx_playbackState'));
     if (!saved || !saved.current) return;
 
-    S.queue = saved.queue || [];
+    S.queue    = saved.queue || [];
     S.queueIdx = saved.queueIdx || 0;
-    S.volume = saved.volume ?? 80;
+    S.volume   = saved.volume ?? 80;
     ytVol(S.volume);
 
-    S.current = saved.current;
-    isOfflineMode = true;
-    S.playing = false;
+    S.current  = saved.current;
+    S.playing  = false;
 
-    // Restore UI immediately without audio
+    // Restore UI immediately (paused) — user presses play to resume
     updateNP(); updateBtn(); renderQueue(); highlightQ();
 
-    // Load audio src in background (paused) so seek position is ready when user presses play
-    getOfflineAudio(S.current.id).then(async blob => {
+    // Only restore offline audio src if we have a downloaded blob
+    getOfflineAudio(S.current.id).then(blob => {
       if (blob) {
+        isOfflineMode = true;
         offAudio.src = URL.createObjectURL(blob);
-      } else {
-        try {
-          const r = await fetch(`${API_BASE}/api/stream?id=${S.current.id}`);
-          const d = await r.json();
-          if (d.url) offAudio.src = d.url;
-        } catch(e) { /* stay silent — user will trigger play manually */ }
-      }
-      if (offAudio.src) {
         const onMeta = () => {
           offAudio.currentTime = saved.time || 0;
           updateProgressUI(((saved.time||0)/(offAudio.duration||1))*100, saved.time, offAudio.duration);
           offAudio.removeEventListener('loadedmetadata', onMeta);
         };
         offAudio.addEventListener('loadedmetadata', onMeta);
-        // Do NOT call offAudio.play() — let the user press play first
+        // Do NOT play — let user press play
+      } else {
+        // No offline copy: prime YouTube IFrame so pressing play works immediately
+        isOfflineMode = false;
+        // Load but don't autoplay (autoplay: 0 is already set in playerVars)
+        if (S.ytReady) S.ytPlayer.cueVideoById(S.current.id, saved.time || 0);
+        else {
+          // ytPlayer not ready yet — cue after it's ready
+          const origReady = window.onYouTubeIframeAPIReady;
+          window.onYouTubeIframeAPIReady = () => {
+            if (origReady) origReady();
+            setTimeout(() => { if (S.ytReady) S.ytPlayer.cueVideoById(S.current.id, saved.time || 0); }, 100);
+          };
+        }
       }
     });
   } catch(e) {}
