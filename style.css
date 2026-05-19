@@ -176,14 +176,14 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
 .progress-bar-container { display: flex; align-items: center; gap: 10px; width: 100%; }
 .time-current, .time-total { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; min-width: 34px; }
 .time-total { text-align: right; }
-.progress-bar { flex: 1; height: 4px; background: var(--bg-hover); border-radius: 2px; position: relative; cursor: pointer; }
+.progress-bar { flex: 1; height: 4px; background: var(--bg-hover); border-radius: 2px; position: relative; cursor: pointer; touch-action: none; user-select: none; }
 .progress-bar:hover .progress-fill { background: var(--accent); }
 .progress-bar:hover .progress-thumb { opacity: 1; }
 .progress-fill { height: 100%; background: var(--text-secondary); border-radius: 2px; transition: background .15s; pointer-events: none; width: 0%; }
 .progress-thumb { position: absolute; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; background: var(--text-primary); border-radius: 50%; opacity: 0; pointer-events: none; transition: opacity .15s; margin-left: -6px; }
 .player-right { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .volume-control { display: flex; align-items: center; gap: 8px; }
-.volume-bar { width: 90px; height: 4px; background: var(--bg-hover); border-radius: 2px; position: relative; cursor: pointer; }
+.volume-bar { width: 90px; height: 4px; background: var(--bg-hover); border-radius: 2px; position: relative; cursor: pointer; touch-action: none; user-select: none; }
 .volume-bar:hover .volume-fill { background: var(--accent); }
 .volume-fill { height: 100%; background: var(--text-secondary); border-radius: 2px; transition: background .15s; pointer-events: none; }
 .volume-thumb { position: absolute; top: 50%; transform: translate(-50%, -50%); width: 10px; height: 10px; background: var(--text-primary); border-radius: 50%; pointer-events: none; }

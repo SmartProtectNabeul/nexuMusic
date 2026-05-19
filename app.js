@@ -363,17 +363,20 @@ function getDuration() {
   return isOfflineMode ? (offAudio.duration || 0) : (S.ytPlayer?.getDuration() || 0);
 }
 
+let _dragDuration = 0; // cached once at drag-start — avoids IFrame bridge calls on every move
+
 function handleProgressDrag(e) {
-  const r=$('progress-bar').getBoundingClientRect();
-  let pct = (e.clientX-r.left)/r.width;
+  const r = $('progress-bar').getBoundingClientRect();
+  let pct = (e.clientX - r.left) / r.width;
   pct = Math.max(0, Math.min(1, pct));
-  const dur = getDuration();
-  updateProgressUI(pct*100, pct*dur, dur);
+  updateProgressUI(pct * 100, pct * _dragDuration, _dragDuration);
   return pct;
 }
 
 $('progress-bar').addEventListener('pointerdown', e => {
   if (!S.current) return;
+  _dragDuration = getDuration(); // cache once — reused for entire drag
+  if (!_dragDuration) return;   // nothing to seek if duration unknown yet
   isDraggingProgress = true;
   $('progress-bar').setPointerCapture(e.pointerId);
   handleProgressDrag(e);
@@ -387,10 +390,10 @@ $('progress-bar').addEventListener('pointerup', e => {
   $('progress-bar').releasePointerCapture(e.pointerId);
   const pct = handleProgressDrag(e);
   if (isOfflineMode) {
-    offAudio.currentTime = pct * (offAudio.duration || 0);
+    offAudio.currentTime = pct * _dragDuration;
     setTimeout(updateMediaPosition, 200);
   } else if (S.ytReady) {
-    S.ytPlayer.seekTo(pct * (S.ytPlayer.getDuration() || 0));
+    S.ytPlayer.seekTo(pct * _dragDuration);
     setTimeout(updateMediaPosition, 200);
   }
 });

@@ -116,6 +116,48 @@ async function ytTrending() {
   return await ytSearch('Top Hits Music Playlist 2024');
 }
 
+// ── Shared: extract direct audio CDN URL from YouTube page ───────────────────
+async function extractAudioUrl(id) {
+  const pageUrl = `https://www.youtube.com/watch?v=${id}`;
+  const pageResp = await new Promise((resolve, reject) => {
+    https.get(pageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      }
+    }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }).on('error', reject);
+  });
+
+  const startToken = 'ytInitialPlayerResponse=';
+  const startIdx = pageResp.indexOf(startToken);
+  if (startIdx === -1) throw new Error('Could not find player data on page');
+
+  let jsonStart = pageResp.indexOf('{', startIdx + startToken.length);
+  if (jsonStart === -1) throw new Error('Could not find JSON start');
+
+  let depth = 0, jsonEnd = -1;
+  for (let i = jsonStart; i < pageResp.length; i++) {
+    if (pageResp[i] === '{') depth++;
+    else if (pageResp[i] === '}') { depth--; if (depth === 0) { jsonEnd = i; break; } }
+  }
+  if (jsonEnd === -1) throw new Error('Could not find JSON end');
+
+  let playerData;
+  try { playerData = JSON.parse(pageResp.slice(jsonStart, jsonEnd + 1)); }
+  catch(e) { throw new Error('Failed to parse player data'); }
+
+  const formats = [
+    ...(playerData?.streamingData?.adaptiveFormats || []),
+    ...(playerData?.streamingData?.formats || [])
+  ];
+  const audioFmt = formats
+    .filter(f => f.mimeType?.startsWith('audio/') && f.url)
+    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+  if (!audioFmt) throw new Error('No playable audio URL found');
+  return audioFmt;
+}
+
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://localhost:${PORT}`);
@@ -182,76 +224,54 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+
   // ── /api/download ────────────────────────────────────────────────────────
   if (p === '/api/download') {
     const id = u.searchParams.get('id');
-    if (!id) return json({ error: 'Missing id' }, 400);
+    if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
     try {
-      const ytdl = require('@distube/ytdl-core');
-      res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
-        'Content-Disposition': `attachment; filename="${id}.mp3"`
+      console.log(`[download] ${id}`);
+      const fmt = await extractAudioUrl(id);
+      console.log(`[download] → ${fmt.mimeType} @ ${fmt.bitrate}bps`);
+
+      // Pipe directly from YouTube's CDN to the client
+      https.get(fmt.url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+          'Referer': 'https://www.youtube.com/',
+          'Origin': 'https://www.youtube.com',
+        }
+      }, audioRes => {
+        res.writeHead(200, {
+          'Content-Type': fmt.mimeType || 'audio/mp4',
+          'Content-Length': audioRes.headers['content-length'] || '',
+          'Content-Disposition': `attachment; filename="${id}.m4a"`,
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+        });
+        audioRes.pipe(res);
+        audioRes.on('error', err => { console.error('[download] pipe error:', err.message); res.end(); });
+      }).on('error', err => {
+        console.error('[download] CDN fetch error:', err.message);
+        if (!res.headersSent) json({ error: 'CDN fetch failed' }, 502);
       });
-      ytdl(`https://www.youtube.com/watch?v=${id}`, { filter: 'audioonly', quality: 'highestaudio' }).pipe(res);
     } catch(err) {
       console.error('[download] error:', err.message);
-      if (!res.headersSent) res.end();
+      if (!res.headersSent) json({ error: err.message }, 502);
     }
     return;
   }
 
   // ── /api/stream ──────────────────────────────────────────────────────────
   // Returns a JSON {url} pointing to the audio stream so the browser fetches it directly.
-  // This avoids piping through the server and the ESM import issue with ytdl-core.
   if (p === '/api/stream') {
     const id = u.searchParams.get('id');
-    if (!id) return json({ error: 'Missing id' }, 400);
+    if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
     try {
-      // Fetch YouTube player page to extract stream URL
-      const pageUrl = `https://www.youtube.com/watch?v=${id}`;
-      const playerResp = await new Promise((resolve, reject) => {
-        https.get(pageUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-          }
-        }, res => { let d=''; res.on('data', c => d+=c); res.on('end', () => resolve(d)); }).on('error', reject);
-      });
-
-      // Extract ytInitialPlayerResponse from the page using brace counting
-      // (a non-greedy regex fails on large nested JSON objects)
-      const startToken = 'ytInitialPlayerResponse=';
-      const startIdx = playerResp.indexOf(startToken);
-      if (startIdx === -1) return json({ error: 'Could not find player data on page' }, 502);
-
-      let jsonStart = playerResp.indexOf('{', startIdx + startToken.length);
-      if (jsonStart === -1) return json({ error: 'Could not find JSON start' }, 502);
-
-      let depth = 0, jsonEnd = -1;
-      for (let i = jsonStart; i < playerResp.length; i++) {
-        if (playerResp[i] === '{') depth++;
-        else if (playerResp[i] === '}') { depth--; if (depth === 0) { jsonEnd = i; break; } }
-      }
-      if (jsonEnd === -1) return json({ error: 'Could not find JSON end' }, 502);
-
-      let playerData;
-      try { playerData = JSON.parse(playerResp.slice(jsonStart, jsonEnd + 1)); }
-      catch(pe) { console.error('[stream] JSON parse error:', pe.message); return json({ error: 'Failed to parse player data' }, 502); }
-
-      const formats = [
-        ...(playerData?.streamingData?.adaptiveFormats || []),
-        ...(playerData?.streamingData?.formats || [])
-      ];
-      // Pick best audio-only format that has a direct URL (not cipher-encrypted)
-      const audioFmt = formats
-        .filter(f => f.mimeType?.startsWith('audio/') && f.url)
-        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-      if (!audioFmt) {
-        console.error('[stream] No playable audio format found. formats count:', formats.length);
-        return json({ error: 'No audio stream found' }, 404);
-      }
-      console.log(`[stream] → ${audioFmt.mimeType} @ ${audioFmt.bitrate}bps`);
-      return json({ url: audioFmt.url, mimeType: audioFmt.mimeType });
+      console.log(`[stream] ${id}`);
+      const fmt = await extractAudioUrl(id);
+      console.log(`[stream] → ${fmt.mimeType} @ ${fmt.bitrate}bps`);
+      return json({ url: fmt.url, mimeType: fmt.mimeType });
     } catch(err) {
       console.error('[stream] error:', err.message);
       return json({ error: err.message }, 502);
