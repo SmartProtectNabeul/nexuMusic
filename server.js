@@ -52,6 +52,31 @@ function postJSON(url, body) {
   });
 }
 
+// Simple GET → parsed JSON helper (used by extractAudioUrl strategies)
+function getJSON(url, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        ...extraHeaders,
+      },
+    }, res => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch(e) { reject(new Error(`Invalid JSON from ${u.hostname}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.end();
+  });
+}
+
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 function parseDur(str) {
   if (!str) return 0;
@@ -116,47 +141,89 @@ async function ytTrending() {
   return await ytSearch('Top Hits Music Playlist 2024');
 }
 
-// ── Shared: extract direct audio CDN URL from YouTube page ───────────────────
+// ── Shared: extract direct audio CDN URL — 3-strategy waterfall ──────────────
+// YouTube's page HTML serves cipher-encrypted URLs (signatureCipher), not direct
+// ones. Piped and Invidious are open-source YouTube frontends that decipher them.
 async function extractAudioUrl(id) {
-  const pageUrl = `https://www.youtube.com/watch?v=${id}`;
-  const pageResp = await new Promise((resolve, reject) => {
-    https.get(pageUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      }
-    }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }).on('error', reject);
-  });
 
-  const startToken = 'ytInitialPlayerResponse=';
-  const startIdx = pageResp.indexOf(startToken);
-  if (startIdx === -1) throw new Error('Could not find player data on page');
-
-  let jsonStart = pageResp.indexOf('{', startIdx + startToken.length);
-  if (jsonStart === -1) throw new Error('Could not find JSON start');
-
-  let depth = 0, jsonEnd = -1;
-  for (let i = jsonStart; i < pageResp.length; i++) {
-    if (pageResp[i] === '{') depth++;
-    else if (pageResp[i] === '}') { depth--; if (depth === 0) { jsonEnd = i; break; } }
-  }
-  if (jsonEnd === -1) throw new Error('Could not find JSON end');
-
-  let playerData;
-  try { playerData = JSON.parse(pageResp.slice(jsonStart, jsonEnd + 1)); }
-  catch(e) { throw new Error('Failed to parse player data'); }
-
-  const formats = [
-    ...(playerData?.streamingData?.adaptiveFormats || []),
-    ...(playerData?.streamingData?.formats || [])
+  // ── Strategy 1: Piped API (fastest, deciphers cipher URLs) ──────────────────
+  const PIPED_INSTANCES = [
+    'https://pipedapi.kavin.rocks',
+    'https://piped-api.garudalinux.org',
+    'https://api.piped.projectsegfau.lt',
   ];
-  const audioFmt = formats
-    .filter(f => f.mimeType?.startsWith('audio/') && f.url)
-    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  for (const base of PIPED_INSTANCES) {
+    try {
+      const data = await getJSON(`${base}/streams/${id}`);
+      const streams = (data.audioStreams || [])
+        .filter(s => s.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (streams.length) {
+        console.log(`[extract] Piped OK (${base}): ${streams[0].mimeType}`);
+        return { url: streams[0].url, mimeType: streams[0].mimeType || 'audio/mp4', bitrate: streams[0].bitrate || 0 };
+      }
+    } catch(e) {
+      console.warn(`[extract] Piped ${base} failed: ${e.message}`);
+    }
+  }
 
-  if (!audioFmt) throw new Error('No playable audio URL found');
-  return audioFmt;
+  // ── Strategy 2: Invidious API ────────────────────────────────────────────────
+  const INVIDIOUS_INSTANCES = [
+    'https://inv.nadeko.net',
+    'https://invidious.privacydev.net',
+    'https://iv.melmac.space',
+  ];
+  for (const base of INVIDIOUS_INSTANCES) {
+    try {
+      const data = await getJSON(`${base}/api/v1/videos/${id}?fields=adaptiveFormats`);
+      const formats = (data.adaptiveFormats || [])
+        .filter(f => f.type?.startsWith('audio/') && f.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (formats.length) {
+        console.log(`[extract] Invidious OK (${base}): ${formats[0].type}`);
+        return { url: formats[0].url, mimeType: formats[0].type || 'audio/mp4', bitrate: formats[0].bitrate || 0 };
+      }
+    } catch(e) {
+      console.warn(`[extract] Invidious ${base} failed: ${e.message}`);
+    }
+  }
+
+  // ── Strategy 3: YouTube page scrape (works only when URLs aren't ciphered) ───
+  try {
+    const pageResp = await new Promise((resolve, reject) => {
+      https.get(`https://www.youtube.com/watch?v=${id}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        }
+      }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); }).on('error', reject);
+    });
+    const startToken = 'ytInitialPlayerResponse=';
+    const startIdx = pageResp.indexOf(startToken);
+    if (startIdx !== -1) {
+      let jsonStart = pageResp.indexOf('{', startIdx + startToken.length);
+      let depth = 0, jsonEnd = -1;
+      for (let i = jsonStart; i < pageResp.length; i++) {
+        if (pageResp[i] === '{') depth++;
+        else if (pageResp[i] === '}') { depth--; if (depth === 0) { jsonEnd = i; break; } }
+      }
+      if (jsonEnd !== -1) {
+        const pd = JSON.parse(pageResp.slice(jsonStart, jsonEnd + 1));
+        const formats = [...(pd?.streamingData?.adaptiveFormats || []), ...(pd?.streamingData?.formats || [])];
+        const audioFmt = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+        if (audioFmt) {
+          console.log(`[extract] page-scrape OK: ${audioFmt.mimeType}`);
+          return { url: audioFmt.url, mimeType: audioFmt.mimeType, bitrate: audioFmt.bitrate || 0 };
+        }
+      }
+    }
+  } catch(e) {
+    console.warn(`[extract] page-scrape failed: ${e.message}`);
+  }
+
+  throw new Error('All extraction strategies failed — video may be restricted or unavailable');
 }
+
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
