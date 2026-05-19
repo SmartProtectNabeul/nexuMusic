@@ -62,6 +62,7 @@ const $ = id => document.getElementById(id);
 const bgAudio = $('bg-audio');
 const offAudio = $('offline-audio');
 let isOfflineMode = false;
+let _restoredState = null; // set by loadPlaybackState; consumed on first play press
 
 offAudio.addEventListener('ended', () => { S.repeat ? offAudio.play() : nextTrack(); });
 offAudio.addEventListener('play', () => { 
@@ -295,8 +296,20 @@ function updateNP() {
 function updateBtn(){ $('icon-play').classList.toggle('hidden',S.playing); $('icon-pause').classList.toggle('hidden',!S.playing); }
 $('btn-play-pause').addEventListener('click',()=>{
   if(!S.current) return; // nothing loaded yet
-  if (S.playing) { isOfflineMode ? offAudio.pause() : S.ytPlayer?.pauseVideo(); }
-  else           { isOfflineMode ? offAudio.play()  : S.ytPlayer?.playVideo();  }
+  if (S.playing) {
+    isOfflineMode ? offAudio.pause() : S.ytPlayer?.pauseVideo();
+  } else {
+    if (_restoredState) {
+      // First play after page restore — player hasn't been primed yet
+      const rs = _restoredState;
+      _restoredState = null;
+      playTrack(rs.track); // loadVideoById → starts playing
+    } else if (isOfflineMode) {
+      offAudio.play();
+    } else {
+      S.ytPlayer?.playVideo();
+    }
+  }
 });
 $('btn-next').addEventListener('click',nextTrack);
 $('btn-prev').addEventListener('click',prevTrack);
@@ -713,37 +726,29 @@ function loadPlaybackState() {
     S.volume   = saved.volume ?? 80;
     ytVol(S.volume);
 
-    S.current  = saved.current;
-    S.playing  = false;
+    S.current = saved.current;
+    S.playing = false;
 
     // Restore UI immediately (paused) — user presses play to resume
     updateNP(); updateBtn(); renderQueue(); highlightQ();
 
-    // Only restore offline audio src if we have a downloaded blob
     getOfflineAudio(S.current.id).then(blob => {
       if (blob) {
+        // Downloaded track: load into HTML audio at the saved position
         isOfflineMode = true;
+        _restoredState = null; // no flag needed — audio element is primed
         offAudio.src = URL.createObjectURL(blob);
-        const onMeta = () => {
+        offAudio.addEventListener('loadedmetadata', function onMeta() {
           offAudio.currentTime = saved.time || 0;
           updateProgressUI(((saved.time||0)/(offAudio.duration||1))*100, saved.time, offAudio.duration);
           offAudio.removeEventListener('loadedmetadata', onMeta);
-        };
-        offAudio.addEventListener('loadedmetadata', onMeta);
-        // Do NOT play — let user press play
+        });
+        // Do NOT call offAudio.play() — let user press play
       } else {
-        // No offline copy: prime YouTube IFrame so pressing play works immediately
+        // Not downloaded: mark as a pending restore so the play button
+        // triggers a full playTrack() call instead of a no-op playVideo()
         isOfflineMode = false;
-        // Load but don't autoplay (autoplay: 0 is already set in playerVars)
-        if (S.ytReady) S.ytPlayer.cueVideoById(S.current.id, saved.time || 0);
-        else {
-          // ytPlayer not ready yet — cue after it's ready
-          const origReady = window.onYouTubeIframeAPIReady;
-          window.onYouTubeIframeAPIReady = () => {
-            if (origReady) origReady();
-            setTimeout(() => { if (S.ytReady) S.ytPlayer.cueVideoById(S.current.id, saved.time || 0); }, 100);
-          };
-        }
+        _restoredState = { track: saved.current, time: saved.time || 0 };
       }
     });
   } catch(e) {}
