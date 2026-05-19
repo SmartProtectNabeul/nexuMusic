@@ -121,12 +121,13 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://localhost:${PORT}`);
   const p = u.pathname;
 
-  const origin = req.headers.origin;
-  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  // Always allow CORS from any origin
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
@@ -200,18 +201,36 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── /api/stream ──────────────────────────────────────────────────────────
+  // Returns a JSON {url} pointing to the audio stream so the browser fetches it directly.
+  // This avoids piping through the server and the ESM import issue with ytdl-core.
   if (p === '/api/stream') {
     const id = u.searchParams.get('id');
     if (!id) return json({ error: 'Missing id' }, 400);
     try {
-      const ytdl = require('@distube/ytdl-core');
-      res.writeHead(200, { 'Content-Type': 'audio/webm' });
-      ytdl(`https://www.youtube.com/watch?v=${id}`, { filter: 'audioonly', quality: 'highestaudio' }).pipe(res);
+      // Fetch YouTube player page to extract stream URL
+      const pageUrl = `https://www.youtube.com/watch?v=${id}`;
+      const playerResp = await new Promise((resolve, reject) => {
+        https.get(pageUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+          }
+        }, res => { let d=''; res.on('data', c => d+=c); res.on('end', () => resolve(d)); }).on('error', reject);
+      });
+
+      // Extract ytInitialPlayerResponse from the page
+      const match = playerResp.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
+      if (!match) return json({ error: 'Could not extract player data' }, 502);
+      const playerData = JSON.parse(match[1]);
+      const formats = playerData?.streamingData?.adaptiveFormats || playerData?.streamingData?.formats || [];
+      // Pick best audio-only format
+      const audioFmt = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url).sort((a,b) => (b.bitrate||0)-(a.bitrate||0))[0];
+      if (!audioFmt) return json({ error: 'No audio stream found' }, 404);
+      return json({ url: audioFmt.url, mimeType: audioFmt.mimeType });
     } catch(err) {
       console.error('[stream] error:', err.message);
-      if (!res.headersSent) res.end();
+      return json({ error: err.message }, 502);
     }
-    return;
   }
 
   if (p === '/api/log') {

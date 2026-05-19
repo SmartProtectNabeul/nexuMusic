@@ -225,25 +225,45 @@ function renderList(container, tracks, queue) {
 function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S.queue[idx]); renderQueue(); }
 async function playTrack(t) {
   if(!t) return;
-  S.current=t; 
-  
-  const blob = await getOfflineAudio(t.id);
-  isOfflineMode = true; // Use native audio for ALL playback to ensure background play!
+  S.current=t;
+  isOfflineMode = true;
   if (S.ytReady) S.ytPlayer.pauseVideo();
-  
+
+  const blob = await getOfflineAudio(t.id);
   if (blob) {
     offAudio.src = URL.createObjectURL(blob);
   } else {
-    offAudio.src = `${API_BASE}/api/stream?id=${t.id}`;
+    try {
+      const streamRes = await fetch(`${API_BASE}/api/stream?id=${t.id}`);
+      if (!streamRes.ok) throw new Error('stream fetch failed');
+      const streamData = await streamRes.json();
+      if (!streamData.url) throw new Error('no url in stream response');
+      offAudio.src = streamData.url;
+    } catch(e) {
+      console.warn('Stream failed, falling back to YouTube IFrame:', e.message);
+      isOfflineMode = false;
+      if (S.ytReady) { S.ytPlayer.loadVideoById(t.id); S.playing = true; }
+      updateNP(); updateBtn(); addRecent(t); highlightQ();
+      bgAudio.play().catch(()=>{});
+      return;
+    }
   }
-  
-  offAudio.play().catch(e => { console.error('Play error', e); toast('Error playing audio'); });
+
+  offAudio.play().catch(e => { console.error('Play error', e); });
   S.playing = true;
-  
   updateNP(); updateBtn(); addRecent(t); highlightQ();
   bgAudio.play().catch(()=>{});
 }
-offAudio.addEventListener('error', () => { toast('Stream error, skipping...'); nextTrack(); });
+
+let _audioErrorCount = 0;
+offAudio.addEventListener('error', () => {
+  _audioErrorCount++;
+  if (_audioErrorCount <= 1) {
+    toast('Audio unavailable, skipping...');
+    setTimeout(nextTrack, 500);
+  }
+});
+offAudio.addEventListener('play', () => { _audioErrorCount = 0; });
 function updateNP() {
   const t=S.current; if(!t) return;
   $('np-title').textContent=t.title; $('np-artist').textContent=t.artist;
@@ -688,27 +708,39 @@ function loadPlaybackState() {
   try {
     const saved = JSON.parse(localStorage.getItem('nx_playbackState'));
     if (!saved || !saved.current) return;
-    
+
     S.queue = saved.queue || [];
     S.queueIdx = saved.queueIdx || 0;
     S.volume = saved.volume ?? 80;
     ytVol(S.volume);
-    
+
     S.current = saved.current;
     isOfflineMode = true;
-    
-    getOfflineAudio(S.current.id).then(blob => {
-      offAudio.src = blob ? URL.createObjectURL(blob) : `${API_BASE}/api/stream?id=${S.current.id}`;
-      const onMeta = () => {
-        offAudio.currentTime = saved.time || 0;
-        updateProgressUI(((saved.time||0)/(offAudio.duration||1))*100, saved.time, offAudio.duration);
-        offAudio.removeEventListener('loadedmetadata', onMeta);
-      };
-      offAudio.addEventListener('loadedmetadata', onMeta);
-      
-      offAudio.pause();
-      S.playing = false;
-      updateNP(); updateBtn(); renderQueue(); highlightQ();
+    S.playing = false;
+
+    // Restore UI immediately without audio
+    updateNP(); updateBtn(); renderQueue(); highlightQ();
+
+    // Load audio src in background (paused) so seek position is ready when user presses play
+    getOfflineAudio(S.current.id).then(async blob => {
+      if (blob) {
+        offAudio.src = URL.createObjectURL(blob);
+      } else {
+        try {
+          const r = await fetch(`${API_BASE}/api/stream?id=${S.current.id}`);
+          const d = await r.json();
+          if (d.url) offAudio.src = d.url;
+        } catch(e) { /* stay silent — user will trigger play manually */ }
+      }
+      if (offAudio.src) {
+        const onMeta = () => {
+          offAudio.currentTime = saved.time || 0;
+          updateProgressUI(((saved.time||0)/(offAudio.duration||1))*100, saved.time, offAudio.duration);
+          offAudio.removeEventListener('loadedmetadata', onMeta);
+        };
+        offAudio.addEventListener('loadedmetadata', onMeta);
+        // Do NOT call offAudio.play() — let the user press play first
+      }
     });
   } catch(e) {}
 }
