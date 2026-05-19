@@ -224,7 +224,8 @@ function renderList(container, tracks, queue) {
 
 // ── Playback ──────────────────────────────────────────────────────────────────
 function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S.queue[idx]); renderQueue(); }
-async function playTrack(t) {
+// startTime (seconds) is optional — used when restoring a saved position
+async function playTrack(t, startTime = 0) {
   if(!t) return;
   S.current = t;
 
@@ -243,7 +244,11 @@ async function playTrack(t) {
   } else {
     // ── Not downloaded → go straight to YouTube IFrame (no /api/stream call) ─
     isOfflineMode = false;
-    if (S.ytReady) { S.ytPlayer.loadVideoById(t.id); S.playing = true; }
+    if (S.ytReady) {
+      // loadVideoById accepts {videoId, startSeconds} to seek on load
+      S.ytPlayer.loadVideoById(startTime > 0 ? { videoId: t.id, startSeconds: startTime } : t.id);
+      S.playing = true;
+    }
     bgAudio.play().catch(()=>{});
   }
 
@@ -303,7 +308,7 @@ $('btn-play-pause').addEventListener('click',()=>{
       // First play after page restore — player hasn't been primed yet
       const rs = _restoredState;
       _restoredState = null;
-      playTrack(rs.track); // loadVideoById → starts playing
+      playTrack(rs.track, rs.time); // resume from saved position
     } else if (isOfflineMode) {
       offAudio.play();
     } else {
@@ -707,9 +712,13 @@ $('btn-logout').addEventListener('click', () => {
 // ── Persistence ───────────────────────────────────────────────────────────────
 function savePlaybackState() {
   if (!S.current) return;
+  // Pick the right time source depending on which player is active
+  const time = isOfflineMode
+    ? (offAudio.currentTime || 0)
+    : (S.ytPlayer?.getCurrentTime?.() || 0);
   localStorage.setItem('nx_playbackState', JSON.stringify({
     queue: S.queue, queueIdx: S.queueIdx,
-    current: S.current, time: offAudio.currentTime || 0, volume: S.volume
+    current: S.current, time, volume: S.volume
   }));
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') savePlaybackState(); });
