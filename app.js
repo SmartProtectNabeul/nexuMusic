@@ -1,5 +1,7 @@
 // ── API helpers ──────────────────────────────────────────────────────────────
-const API_BASE = 'https://nexumusic.onrender.com';
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:3000'
+  : 'https://nexumusic.onrender.com';
 
 async function apiFetch(path) {
   const r = await fetch(API_BASE + path);

@@ -4,11 +4,15 @@
   "description": "NexoMusic Backend Proxy",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "desktop": "electron electron-main.js"
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
     "play-dl": "^1.9.7",
     "youtubei.js": "^17.0.1"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0"
   }
 }
