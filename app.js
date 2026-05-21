@@ -238,17 +238,43 @@ async function playTrack(t, startTime = 0) {
     // ── Offline / downloaded track → use HTML <audio> ───────────────────────
     isOfflineMode = true;
     offAudio.src = URL.createObjectURL(blob);
+    if (startTime > 0) {
+      const onMeta = () => {
+        offAudio.currentTime = startTime;
+        offAudio.removeEventListener('loadedmetadata', onMeta);
+      };
+      offAudio.addEventListener('loadedmetadata', onMeta);
+    }
     offAudio.play().catch(e => { console.error('Play error', e); });
     S.playing = true;
     bgAudio.play().catch(()=>{});
   } else {
-    // ── Not downloaded → go straight to YouTube IFrame (no /api/stream call) ─
-    isOfflineMode = false;
-    if (S.ytReady) {
-      // loadVideoById accepts {videoId, startSeconds} to seek on load
-      S.ytPlayer.loadVideoById(startTime > 0 ? { videoId: t.id, startSeconds: startTime } : t.id);
-      S.playing = true;
+    // ── Online track → Stream via HTML5 <audio> using our backend proxy ──────
+    isOfflineMode = true;
+    
+    // Set source to our proxy streaming endpoint
+    offAudio.src = `${API_BASE}/api/stream?id=${t.id}`;
+    
+    if (startTime > 0) {
+      const onMeta = () => {
+        offAudio.currentTime = startTime;
+        offAudio.removeEventListener('loadedmetadata', onMeta);
+      };
+      offAudio.addEventListener('loadedmetadata', onMeta);
     }
+    
+    offAudio.play().catch(e => {
+      console.warn('Proxy streaming failed, falling back to YouTube IFrame player:', e);
+      // Fallback: Use standard YouTube IFrame (no background playback support)
+      isOfflineMode = false;
+      offAudio.pause();
+      if (S.ytReady) {
+        S.ytPlayer.loadVideoById(startTime > 0 ? { videoId: t.id, startSeconds: startTime } : t.id);
+        S.playing = true;
+      }
+    });
+    
+    S.playing = true;
     bgAudio.play().catch(()=>{});
   }
 
@@ -259,8 +285,24 @@ let _audioErrorCount = 0;
 offAudio.addEventListener('error', () => {
   _audioErrorCount++;
   if (_audioErrorCount <= 1) {
-    toast('Audio unavailable, skipping...');
-    setTimeout(nextTrack, 500);
+    if (offAudio.src && offAudio.src.startsWith('blob:')) {
+      toast('Audio unavailable, skipping...');
+      setTimeout(nextTrack, 500);
+    } else {
+      // It is an online stream that failed to load on offAudio.
+      // Let's try falling back to YouTube IFrame as a backup!
+      console.warn('Proxy streaming failed, falling back to YouTube IFrame...');
+      isOfflineMode = false;
+      offAudio.pause();
+      if (S.ytReady) {
+        toast('Streaming failed, playing via YouTube player (No background support)');
+        S.ytPlayer.loadVideoById(S.current.id);
+        S.playing = true;
+      } else {
+        toast('Audio unavailable, skipping...');
+        setTimeout(nextTrack, 500);
+      }
+    }
   }
 });
 offAudio.addEventListener('play', () => { _audioErrorCount = 0; });

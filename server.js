@@ -2,9 +2,13 @@ const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
+const { execFile } = require('child_process');
 
 const PORT = 3000;
 const DIR  = __dirname;
+
+const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+const BIN_PATH = path.join(DIR, BIN_NAME);
 const MIME = {
   '.html':'text/html', '.css':'text/css', '.js':'application/javascript',
   '.json':'application/json', '.ico':'image/x-icon', '.png':'image/png',
@@ -141,49 +145,69 @@ async function ytTrending() {
   return await ytSearch('Top Hits Music Playlist 2024');
 }
 
-// ── Shared: extract direct audio CDN URL ──────────────────────────────────────
-// YouTube has aggressively blocked Piped, Invidious, and scraping by enforcing
-// po_tokens and cipher encryption. We now use loader.to API to get the MP3 URL.
-async function extractAudioUrl(id) {
-  try {
-    const initUrl = `https://loader.to/ajax/download.php?format=mp3&url=https://www.youtube.com/watch?v=${id}`;
-    const initData = await getJSON(initUrl);
-    if (!initData || !initData.id) throw new Error('Loader.to init failed');
-
-    const taskId = initData.id;
-    console.log(`[extract] loader.to task started: ${taskId}`);
-
-    return await new Promise((resolve, reject) => {
-      const progressUrl = `https://p.savenow.to/api/progress?id=${taskId}`;
-      const req = https.get(progressUrl, res => {
-        let buf = '';
-        res.on('data', chunk => {
-          buf += chunk.toString();
-          
-          if (buf.includes('"download_url":')) {
-            const match = buf.match(/"download_url":"([^"]+)"/);
-            if (match && match[1]) {
-              req.destroy();
-              const finalUrl = match[1].replace(/\\/g, '');
-              console.log(`[extract] loader.to OK: ${finalUrl.split('?')[0]}`);
-              resolve({ url: finalUrl, mimeType: 'audio/mpeg', bitrate: 128000 });
+function downloadYtDlp() {
+  return new Promise((resolve, reject) => {
+    console.log('[ensureYtDlp] Downloading yt-dlp binary from GitHub...');
+    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${BIN_NAME}`;
+    const file = fs.createWriteStream(BIN_PATH);
+    
+    function get(u) {
+      https.get(u, (res) => {
+        if ([301, 302, 307, 308].includes(res.statusCode)) {
+          get(res.headers.location);
+        } else if (res.statusCode === 200) {
+          res.pipe(file);
+          file.on('finish', () => {
+            file.close();
+            if (process.platform !== 'win32') {
+              fs.chmodSync(BIN_PATH, 0o755);
             }
-          }
-          
-          if (buf.includes('"success":0') || buf.includes('"text":"Error"')) {
-            req.destroy();
-            reject(new Error('Loader.to conversion failed or blocked'));
-          }
-        });
-        res.on('end', () => reject(new Error('Loader.to stream ended early')));
+            console.log('[ensureYtDlp] Download complete.');
+            resolve();
+          });
+        } else {
+          reject(new Error(`Failed with status: ${res.statusCode}`));
+        }
+      }).on('error', (err) => {
+        reject(err);
       });
-      req.on('error', reject);
-      req.setTimeout(25000, () => { req.destroy(); reject(new Error('Loader.to timeout')); });
-    });
-  } catch (err) {
-    console.warn(`[extract] loader.to failed: ${err.message}`);
-    throw new Error('All extraction strategies failed — video may be restricted or unavailable');
+    }
+    
+    get(url);
+  });
+}
+
+async function ensureYtDlp() {
+  if (fs.existsSync(BIN_PATH)) {
+    const stats = fs.statSync(BIN_PATH);
+    if (stats.size > 1000) {
+      console.log(`[ensureYtDlp] yt-dlp binary verified at: ${BIN_PATH}`);
+      return;
+    }
+    console.warn(`[ensureYtDlp] yt-dlp file is corrupted or too small (${stats.size} bytes). Re-downloading...`);
+    try { fs.unlinkSync(BIN_PATH); } catch(e) {}
   }
+  await downloadYtDlp();
+}
+
+// ── Shared: extract direct audio CDN URL ──────────────────────────────────────
+async function extractAudioUrl(id) {
+  await ensureYtDlp();
+  console.log(`[extractAudioUrl] Resolving audio stream for ID: ${id}...`);
+  return new Promise((resolve, reject) => {
+    execFile(BIN_PATH, ['-f', 'bestaudio', '-g', '--no-playlist', `https://www.youtube.com/watch?v=${id}`], (err, stdout, stderr) => {
+      if (err) {
+        console.error(`[extractAudioUrl] yt-dlp failed for ${id}:`, err.message);
+        return reject(new Error('Failed to resolve playable formats'));
+      }
+      const directUrl = stdout.trim();
+      if (!directUrl) {
+        return reject(new Error('Empty response from yt-dlp'));
+      }
+      console.log(`[extractAudioUrl] yt-dlp SUCCESS! Direct URL resolved.`);
+      resolve({ url: directUrl, mimeType: 'audio/webm', bitrate: 128000 });
+    });
+  });
 }
 
 
@@ -292,19 +316,55 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── /api/stream ──────────────────────────────────────────────────────────
-  // Returns a JSON {url} pointing to the audio stream so the browser fetches it directly.
   if (p === '/api/stream') {
     const id = u.searchParams.get('id');
     if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
     try {
       console.log(`[stream] ${id}`);
       const fmt = await extractAudioUrl(id);
-      console.log(`[stream] → ${fmt.mimeType} @ ${fmt.bitrate}bps`);
-      return json({ url: fmt.url, mimeType: fmt.mimeType });
+      console.log(`[stream] → piping ${fmt.mimeType} @ ${fmt.bitrate}bps`);
+
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://www.youtube.com/',
+        'Origin': 'https://www.youtube.com',
+      };
+
+      if (req.headers.range) {
+        headers['Range'] = req.headers.range;
+      }
+
+      https.get(fmt.url, { headers }, audioRes => {
+        const responseHeaders = {
+          'Content-Type': fmt.mimeType || 'audio/webm',
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': '*',
+        };
+
+        if (audioRes.headers['content-length']) {
+          responseHeaders['Content-Length'] = audioRes.headers['content-length'];
+        }
+        if (audioRes.headers['content-range']) {
+          responseHeaders['Content-Range'] = audioRes.headers['content-range'];
+        }
+
+        res.writeHead(audioRes.statusCode || 200, responseHeaders);
+        audioRes.pipe(res);
+        
+        audioRes.on('error', err => {
+          console.error('[stream] pipe error:', err.message);
+          res.end();
+        });
+      }).on('error', err => {
+        console.error('[stream] CDN fetch error:', err.message);
+        if (!res.headersSent) json({ error: 'CDN fetch failed' }, 502);
+      });
     } catch(err) {
       console.error('[stream] error:', err.message);
-      return json({ error: err.message }, 502);
+      if (!res.headersSent) json({ error: err.message }, 502);
     }
+    return;
   }
 
   if (p === '/api/log') {
@@ -324,8 +384,16 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   const { exec } = require('child_process');
   console.log(`\n🎵 NexoMusic → http://localhost:${PORT}\n`);
+  
+  try {
+    await ensureYtDlp();
+    console.log('[NexoMusic] yt-dlp is ready for extraction!');
+  } catch(e) {
+    console.error('[NexoMusic] WARNING: Failed to initialize yt-dlp on boot:', e.message);
+  }
+  
   exec(`start http://localhost:${PORT}`);
 });
