@@ -196,48 +196,65 @@ async function ensureYtDlp() {
   await downloadYtDlp();
 }
 
-async function extractAudioUrlFallback(id) {
-  // Try Piped instances
-  const PIPED_INSTANCES = [
-    'https://pipedapi.kavin.rocks',
-    'https://api.piped.projectsegfau.lt',
-    'https://piped-api.garudalinux.org',
-  ];
-  for (const base of PIPED_INSTANCES) {
-    try {
-      console.log(`[extract-fallback] Trying Piped instance: ${base}`);
-      const data = await getJSON(`${base}/streams/${id}`);
-      const streams = (data.audioStreams || [])
-        .filter(s => s.url)
-        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-      if (streams.length) {
-        console.log(`[extract-fallback] Piped OK (${base}): ${streams[0].mimeType}`);
-        return { url: streams[0].url, mimeType: streams[0].mimeType || 'audio/webm', bitrate: streams[0].bitrate || 128000 };
-      }
-    } catch(e) {
-      console.warn(`[extract-fallback] Piped ${base} failed: ${e.message}`);
-    }
-  }
+let healthyInvidiousInstances = [];
+const BACKUP_INVIDIOUS = [
+  'https://inv.thepixora.com',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.flokinet.to',
+  'https://invidious.privacydev.net'
+];
 
-  // Try Invidious instances
-  const INVIDIOUS_INSTANCES = [
-    'https://invidious.yewtu.be',
-    'https://inv.nadeko.net',
-    'https://invidious.privacydev.net',
-  ];
-  for (const base of INVIDIOUS_INSTANCES) {
+async function refreshInvidiousInstances() {
+  try {
+    console.log('[instances] Fetching fresh Invidious instances list...');
+    const list = await getJSON('https://api.invidious.io/instances.json');
+    if (!Array.isArray(list)) return;
+    const parsed = list
+      .map(item => {
+        const domain = item[0];
+        const stats = item[1];
+        return { domain, ...stats };
+      })
+      .filter(inst => {
+        const isHttps = inst.type === 'https';
+        const isHealthy = inst.monitor && inst.monitor.enabled === true && inst.monitor.last_status === 200;
+        // Skip instances that disable API or have issues
+        const isBlacklisted = ['nadeko.net'].some(b => inst.domain.includes(b));
+        return isHttps && isHealthy && inst.domain && !isBlacklisted;
+      })
+      .map(inst => inst.uri || `https://${inst.domain}`);
+    if (parsed.length) {
+      healthyInvidiousInstances = parsed;
+      console.log(`[instances] Loaded ${parsed.length} healthy Invidious instances!`);
+    }
+  } catch(e) {
+    console.warn('[instances] Failed to fetch dynamic instances list:', e.message);
+  }
+}
+
+async function extractAudioUrlFallback(id) {
+  // If we don't have any dynamically loaded instances, try fetching them once!
+  if (!healthyInvidiousInstances || !healthyInvidiousInstances.length) {
+    await refreshInvidiousInstances();
+  }
+  
+  // Combine dynamically fetched instances with our hardcoded backup instances (deduplicated)
+  const instances = [...new Set([...(healthyInvidiousInstances || []), ...BACKUP_INVIDIOUS])];
+  console.log(`[extract-fallback] Waterfalling through ${instances.length} active Invidious instances for ID: ${id}`);
+
+  for (const base of instances) {
     try {
-      console.log(`[extract-fallback] Trying Invidious instance: ${base}`);
+      console.log(`[extract-fallback] Querying Invidious instance: ${base}`);
       const data = await getJSON(`${base}/api/v1/videos/${id}?fields=adaptiveFormats`);
       const formats = (data.adaptiveFormats || [])
         .filter(f => f.type?.startsWith('audio/') && f.url)
         .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
       if (formats.length) {
-        console.log(`[extract-fallback] Invidious OK (${base}): ${formats[0].type}`);
+        console.log(`[extract-fallback] Invidious SUCCESS via ${base}!`);
         return { url: formats[0].url, mimeType: formats[0].type || 'audio/webm', bitrate: formats[0].bitrate || 128000 };
       }
     } catch(e) {
-      console.warn(`[extract-fallback] Invidious ${base} failed: ${e.message}`);
+      console.warn(`[extract-fallback] Instance ${base} failed: ${e.message}`);
     }
   }
 
@@ -485,6 +502,9 @@ server.listen(PORT, async () => {
   const { exec } = require('child_process');
   console.log(`\n🎵 NexoMusic → http://localhost:${PORT}\n`);
   
+  // Dynamically fetch and pre-populate invidious list on boot
+  refreshInvidiousInstances().catch(()=>{});
+
   try {
     await ensureYtDlp();
     console.log('[NexoMusic] yt-dlp is ready for extraction!');

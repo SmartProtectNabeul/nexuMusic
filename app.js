@@ -332,6 +332,11 @@ function prewarmNextTrack() {
 let _audioErrorCount = 0;
 offAudio.addEventListener('error', () => {
   if (!S.current) return;
+  const err = offAudio.error;
+  if (err && err.code === 1) { // MEDIA_ERR_ABORTED
+    console.log('[offAudio] Aborted previous loading request (harmless).');
+    return;
+  }
   _audioErrorCount++;
   if (_audioErrorCount > 1) return; // only handle once per track
   if (offAudio.src && offAudio.src.startsWith('blob:')) {
@@ -339,7 +344,7 @@ offAudio.addEventListener('error', () => {
     setTimeout(nextTrack, 500);
   } else {
     // Online stream failed → fallback to YouTube IFrame
-    console.warn('[offAudio] Stream error, falling back to IFrame...');
+    console.warn('[offAudio] Stream error (code ' + (err ? err.code : 'unknown') + '), falling back to IFrame...');
     isOfflineMode = false;
     offAudio.src = '';
     if (S.ytReady) {
