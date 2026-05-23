@@ -9,6 +9,12 @@ const DIR  = __dirname;
 
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 const BIN_PATH = path.join(DIR, BIN_NAME);
+
+// ── URL cache + dedup ────────────────────────────────────────────────────────
+const urlCache       = new Map(); // id → { url, mimeType, bitrate, expiresAt }
+const pendingExtracts = new Map(); // id → Promise  (dedup in-flight requests)
+const CACHE_TTL_MS   = 5 * 60 * 1000; // 5 min (YouTube CDN URLs last ~6 h)
+
 const MIME = {
   '.html':'text/html', '.css':'text/css', '.js':'application/javascript',
   '.json':'application/json', '.ico':'image/x-icon', '.png':'image/png',
@@ -190,24 +196,48 @@ async function ensureYtDlp() {
   await downloadYtDlp();
 }
 
-// ── Shared: extract direct audio CDN URL ──────────────────────────────────────
+// ── Shared: extract direct audio CDN URL (cached + deduped) ─────────────────
 async function extractAudioUrl(id) {
+  // 1. Cache hit — instant return
+  const cached = urlCache.get(id);
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log(`[extract] Cache HIT for ${id}`);
+    return { url: cached.url, mimeType: cached.mimeType, bitrate: cached.bitrate };
+  }
+  // 2. Dedup — join in-flight extraction instead of spawning another yt-dlp
+  if (pendingExtracts.has(id)) {
+    console.log(`[extract] Dedup: joining in-flight request for ${id}`);
+    return pendingExtracts.get(id);
+  }
+
   await ensureYtDlp();
-  console.log(`[extractAudioUrl] Resolving audio stream for ID: ${id}...`);
-  return new Promise((resolve, reject) => {
-    execFile(BIN_PATH, ['-f', 'bestaudio', '-g', '--no-playlist', `https://www.youtube.com/watch?v=${id}`], (err, stdout, stderr) => {
-      if (err) {
-        console.error(`[extractAudioUrl] yt-dlp failed for ${id}:`, err.message);
-        return reject(new Error('Failed to resolve playable formats'));
+
+  const promise = new Promise((resolve, reject) => {
+    console.log(`[extract] Running yt-dlp for ${id}...`);
+    execFile(
+      BIN_PATH,
+      ['-f', 'bestaudio', '-g', '--no-playlist', '--no-warnings',
+       '--socket-timeout', '8',
+       `https://www.youtube.com/watch?v=${id}`],
+      { timeout: 22000 },   // built-in execFile timeout — sends SIGTERM
+      (err, stdout) => {
+        pendingExtracts.delete(id);
+        if (err) {
+          console.error(`[extract] yt-dlp error for ${id}:`, err.message);
+          return reject(new Error('Audio extraction failed'));
+        }
+        const directUrl = (stdout || '').trim().split('\n')[0];
+        if (!directUrl) return reject(new Error('No audio URL from yt-dlp'));
+        const result = { url: directUrl, mimeType: 'audio/webm', bitrate: 128000 };
+        urlCache.set(id, { ...result, expiresAt: Date.now() + CACHE_TTL_MS });
+        console.log(`[extract] SUCCESS for ${id}`);
+        resolve(result);
       }
-      const directUrl = stdout.trim();
-      if (!directUrl) {
-        return reject(new Error('Empty response from yt-dlp'));
-      }
-      console.log(`[extractAudioUrl] yt-dlp SUCCESS! Direct URL resolved.`);
-      resolve({ url: directUrl, mimeType: 'audio/webm', bitrate: 128000 });
-    });
+    );
   });
+
+  pendingExtracts.set(id, promise);
+  return promise;
 }
 
 
@@ -219,7 +249,8 @@ const server = http.createServer(async (req, res) => {
   // Always allow CORS from any origin
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Disposition');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');

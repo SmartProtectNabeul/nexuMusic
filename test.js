@@ -24,6 +24,7 @@ const doc = {
 };
 const win = {
   addEventListener: ()=>{},
+  location: { hostname: 'test.local' },
   localStorage: { getItem: ()=>null, setItem: ()=>{} },
   supabase: { createClient: ()=>({ from: ()=>({ select: ()=>({ eq: ()=>({ single: async ()=>({data:null}), maybeSingle: async ()=>({data:null}) }) }) }) }) },
   onYouTubeIframeAPIReady: null

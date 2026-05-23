@@ -108,6 +108,12 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
 .tr-like.liked { color: var(--accent); opacity: 1; }
 .tr-more { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; padding: 4px 6px; opacity: 0; transition: opacity .15s; }
 .track-row:hover .tr-more { opacity: 1; }
+.tr-dl { background: none; border: none; cursor: pointer; font-size: 13px; padding: 4px 6px; opacity: 0; transition: opacity .15s, color .15s; color: var(--text-muted); border-radius: 4px; }
+.track-row:hover .tr-dl { opacity: 1; }
+.tr-dl.downloaded { color: var(--accent); opacity: 1; }
+.tr-dl:disabled { color: var(--text-muted); animation: dlspin .7s linear infinite; }
+@keyframes dlspin { to { transform: rotate(360deg); } }
+
 
 /* ===== SEARCH ===== */
 .search-results-header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; }
@@ -150,6 +156,9 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
 .qi-info { overflow: hidden; flex: 1; }
 .qi-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .qi-artist { font-size: 11px; color: var(--text-muted); }
+.qi-num { font-size: 12px; color: var(--text-muted); min-width: 20px; text-align: center; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.queue-item.active .qi-num { color: var(--accent); font-weight: 700; }
+
 
 /* ===== PLAYER BAR ===== */
 .player-bar { position: fixed; bottom: 0; left: 0; right: 0; height: var(--player-h); background: #0e0e16; border-top: 1px solid var(--border); display: grid; grid-template-columns: 280px 1fr 280px; align-items: center; padding: 0 20px; gap: 16px; z-index: 100; }
@@ -290,7 +299,8 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--b
   .section-title { font-size: 24px; margin-bottom: 16px; }
   .track-row { grid-template-columns: 24px 44px 1fr auto; gap: 10px; padding: 6px 0; }
   .tr-duration { display: none; }
-  .tr-like, .tr-more { opacity: 1; color: var(--text-secondary); }
+  .tr-like, .tr-more, .tr-dl { opacity: 1; color: var(--text-secondary); }
+
   
   .liked-header, .playlist-header-view { flex-direction: column; align-items: center; text-align: center; gap: 16px; padding: 20px; }
   .liked-cover, .phv-cover { width: 140px; height: 140px; font-size: 48px; }

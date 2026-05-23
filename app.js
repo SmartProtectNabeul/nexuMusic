@@ -204,23 +204,61 @@ function renderList(container, tracks, queue) {
     const liked=S.liked.some(l=>l.id===t.id), playing=S.current?.id===t.id;
     const row=document.createElement('div');
     row.className='track-row'+(playing?' playing':'');
+    row.dataset.trackId = t.id;
+    row.dataset.rowNum  = i + 1;
     row.innerHTML=`
-      <div class="tr-num">${playing?'▶':i+1}</div>
+      <div class="tr-num">${playing?'&#9654;':i+1}</div>
       <div class="tr-thumb">${thumbHTML(t)}</div>
       <div class="tr-info"><div class="tr-title">${t.title}</div><div class="tr-artist">${t.artist}</div></div>
       <div class="tr-right">
-        <button class="tr-like${liked?' liked':''}" title="Like">♥</button>
+        <button class="tr-dl" title="Save for offline">&#11015;</button>
+        <button class="tr-like${liked?' liked':''}" title="Like">&#9829;</button>
         <span class="tr-duration">${t.duration}</span>
-        <button class="tr-more" title="More">⋯</button>
+        <button class="tr-more" title="More">&#8943;</button>
       </div>`;
+    // Async: mark already-downloaded tracks
+    getOfflineAudio(t.id).then(blob => {
+      const b = row.querySelector('.tr-dl');
+      if (b && blob) { b.textContent = '\u2713'; b.classList.add('downloaded'); }
+    });
+    row.querySelector('.tr-dl').addEventListener('click', e => { e.stopPropagation(); downloadTrack(t, row.querySelector('.tr-dl')); });
     row.querySelector('.tr-like').addEventListener('click',e=>{e.stopPropagation();toggleLike(t,row.querySelector('.tr-like'));});
     row.querySelector('.tr-more').addEventListener('click',e=>{e.stopPropagation();showCtx(e,t);});
     row.addEventListener('click',e=>{
-      if(e.target.classList.contains('tr-like')||e.target.classList.contains('tr-more'))return;
+      if(e.target.classList.contains('tr-like')||e.target.classList.contains('tr-more')||e.target.classList.contains('tr-dl'))return;
       playQueue(queue,i);
     });
     container.appendChild(row);
   });
+}
+
+// ── Download Track ────────────────────────────────────────────────────────────
+async function downloadTrack(t, btn) {
+  const existing = await getOfflineAudio(t.id);
+  if (existing) {
+    if (btn) { btn.textContent = '\u2713'; btn.classList.add('downloaded'); }
+    toast(`Already saved offline \u2713`);
+    return;
+  }
+  if (btn && btn._downloading) return;
+  if (btn) { btn._downloading = true; btn.textContent = '\u27F3'; btn.disabled = true; }
+  toast(`Downloading “${t.title}”…`);
+  try {
+    const res = await fetch(`${API_BASE}/api/download?id=${t.id}`);
+    if (!res.ok) throw new Error(`Server error ${res.status}`);
+    const blob = await res.blob();
+    if (!blob || blob.size < 2000) throw new Error('Empty audio received');
+    await saveOfflineAudio(t.id, blob);
+    // Update ALL visible download buttons for this track
+    document.querySelectorAll(`.track-row[data-track-id="${t.id}"] .tr-dl`).forEach(b => {
+      b.textContent = '\u2713'; b.classList.add('downloaded'); b.disabled = false; delete b._downloading;
+    });
+    toast(`“${t.title}” saved for offline \u2713`);
+  } catch(e) {
+    console.error('Download error:', e);
+    toast(`Download failed — try again`);
+    if (btn) { btn.textContent = '\u2B07'; btn.classList.remove('downloaded'); btn.disabled = false; delete btn._downloading; }
+  }
 }
 
 // ── Playback ──────────────────────────────────────────────────────────────────
@@ -229,6 +267,7 @@ function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S
 async function playTrack(t, startTime = 0) {
   if(!t) return;
   S.current = t;
+  _audioErrorCount = 0; // reset for every new track
 
   // Stop whatever is currently playing
   offAudio.pause();
@@ -279,34 +318,35 @@ async function playTrack(t, startTime = 0) {
     bgAudio.play().catch(()=>{});
   }
 
-  updateNP(); updateBtn(); addRecent(t); highlightQ();
+  updateNP(); updateBtn(); addRecent(t); refreshTrackRows();
 }
 
 let _audioErrorCount = 0;
 offAudio.addEventListener('error', () => {
+  if (!S.current) return;
   _audioErrorCount++;
-  if (_audioErrorCount <= 1) {
-    if (offAudio.src && offAudio.src.startsWith('blob:')) {
+  if (_audioErrorCount > 1) return; // only handle once per track
+  if (offAudio.src && offAudio.src.startsWith('blob:')) {
+    toast('Saved track unavailable, skipping...');
+    setTimeout(nextTrack, 500);
+  } else {
+    // Online stream failed → fallback to YouTube IFrame
+    console.warn('[offAudio] Stream error, falling back to IFrame...');
+    isOfflineMode = false;
+    offAudio.src = '';
+    if (S.ytReady) {
+      toast('Stream failed, using YouTube player (no background)');
+      S.ytPlayer.loadVideoById(S.current.id);
+      S.playing = true;
+      updateBtn();
+    } else {
       toast('Audio unavailable, skipping...');
       setTimeout(nextTrack, 500);
-    } else {
-      // It is an online stream that failed to load on offAudio.
-      // Let's try falling back to YouTube IFrame as a backup!
-      console.warn('Proxy streaming failed, falling back to YouTube IFrame...');
-      isOfflineMode = false;
-      offAudio.pause();
-      if (S.ytReady) {
-        toast('Streaming failed, playing via YouTube player (No background support)');
-        S.ytPlayer.loadVideoById(S.current.id);
-        S.playing = true;
-      } else {
-        toast('Audio unavailable, skipping...');
-        setTimeout(nextTrack, 500);
-      }
     }
   }
 });
 offAudio.addEventListener('play', () => { _audioErrorCount = 0; });
+
 function updateNP() {
   const t=S.current; if(!t) return;
   $('np-title').textContent=t.title; $('np-artist').textContent=t.artist;
@@ -620,10 +660,40 @@ $('btn-queue').addEventListener('click',()=>{
 });
 $('btn-close-queue').addEventListener('click',()=>{ $('queue-panel').classList.add('hidden'); $('app').classList.remove('queue-open'); });
 function renderQueue() {
-  $('queue-list').innerHTML=S.queue.map((t,i)=>`<div class="queue-item${i===S.queueIdx?' active':''}" data-i="${i}"><div class="qi-thumb">${thumbHTML(t)}</div><div class="qi-info"><div class="qi-title">${t.title}</div><div class="qi-artist">${t.artist}</div></div></div>`).join('');
+  $('queue-list').innerHTML=S.queue.map((t,i) => {
+    const active = i===S.queueIdx;
+    return `<div class="queue-item${active?' active':''}" data-i="${i}">
+      <div class="qi-num">${active?'&#9654;':i+1}</div>
+      <div class="qi-thumb">${thumbHTML(t)}</div>
+      <div class="qi-info"><div class="qi-title">${t.title}</div><div class="qi-artist">${t.artist}</div></div>
+    </div>`;
+  }).join('');
   $('queue-list').querySelectorAll('.queue-item').forEach(item=>item.addEventListener('click',()=>{ S.queueIdx=+item.dataset.i; playTrack(S.queue[S.queueIdx]); renderQueue(); }));
+  const activeEl=$('queue-list').querySelector('.queue-item.active');
+  if(activeEl) setTimeout(()=>activeEl.scrollIntoView({block:'nearest',behavior:'smooth'}),50);
 }
-function highlightQ(){ $('queue-list').querySelectorAll('.queue-item').forEach((el,i)=>el.classList.toggle('active',i===S.queueIdx)); }
+function highlightQ() {
+  $('queue-list').querySelectorAll('.queue-item').forEach((el,i)=>{
+    const active=i===S.queueIdx;
+    el.classList.toggle('active',active);
+    const numEl=el.querySelector('.qi-num');
+    if(numEl) numEl.textContent=active?'\u25b6':i+1;
+  });
+  const activeEl=$('queue-list').querySelector('.queue-item.active');
+  if(activeEl) activeEl.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+// ── Refresh all visible track rows to reflect current playing state ─────────────────
+function refreshTrackRows() {
+  document.querySelectorAll('.track-row[data-track-id]').forEach(row => {
+    const id = row.dataset.trackId;
+    const playing = S.current?.id === id;
+    row.classList.toggle('playing', playing);
+    const numEl = row.querySelector('.tr-num');
+    if (numEl) numEl.textContent = playing ? '\u25b6' : row.dataset.rowNum;
+  });
+  highlightQ();
+}
+
 
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 document.addEventListener('keydown',e=>{
