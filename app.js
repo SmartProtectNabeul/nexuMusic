@@ -308,14 +308,7 @@ async function playTrack(t, startTime = 0) {
     }
     
     offAudio.play().catch(e => {
-      console.warn('Proxy streaming failed, falling back to YouTube IFrame player:', e);
-      // Fallback: Use standard YouTube IFrame (no background playback support)
-      isOfflineMode = false;
-      offAudio.pause();
-      if (S.ytReady) {
-        S.ytPlayer.loadVideoById(startTime > 0 ? { videoId: t.id, startSeconds: startTime } : t.id);
-        S.playing = true;
-      }
+      console.warn('[offAudio] Play request deferred or interrupted:', e.message);
     });
     
     S.playing = true;
@@ -323,6 +316,17 @@ async function playTrack(t, startTime = 0) {
   }
 
   updateNP(); updateBtn(); addRecent(t); refreshTrackRows();
+  prewarmNextTrack();
+}
+
+function prewarmNextTrack() {
+  if (!S.queue.length || S.queueIdx === -1) return;
+  const nextIdx = (S.queueIdx + 1) % S.queue.length;
+  const nextTrack = S.queue[nextIdx];
+  if (nextTrack) {
+    console.log(`[prewarm] Pre-warming server cache for next track: ${nextTrack.title}`);
+    fetch(`${API_BASE}/api/stream?id=${nextTrack.id}`, { method: 'HEAD' }).catch(()=>{});
+  }
 }
 
 let _audioErrorCount = 0;
@@ -559,7 +563,16 @@ async function toggleLike(t, btn) {
 $('btn-like-player').addEventListener('click',()=>{ if(S.current) toggleLike(S.current,null); });
 
 // ── Recent ────────────────────────────────────────────────────────────────────
-function addRecent(t){ S.recent=S.recent.filter(r=>r.id!==t.id); S.recent.unshift(t); if(S.recent.length>30)S.recent.length=30; save(); }
+function addRecent(t) {
+  S.recent = S.recent.filter(r => r.id !== t.id);
+  S.recent.unshift(t);
+  if (S.recent.length > 30) S.recent.length = 30;
+  save();
+  renderRecent();
+  if (S.view === 'library') {
+    renderLibrary();
+  }
+}
 
 // ── Home ──────────────────────────────────────────────────────────────────────
 const GENRES=[
