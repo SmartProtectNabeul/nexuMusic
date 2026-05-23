@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nexomusic-v5';
+const CACHE_NAME = 'nexomusic-v6';
 const ASSETS = [
   './',
   './index.html',

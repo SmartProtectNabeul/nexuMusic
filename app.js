@@ -40,10 +40,12 @@ function onYT(e) {
       updateMediaPosition();
     }
     bgAudio.play().catch(()=>{});
+    refreshTrackRows();
   }
   if (e.data === P.PAUSED || e.data === P.BUFFERING) { 
     S.playing = false; updateBtn(); 
     if (e.data === P.PAUSED && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    refreshTrackRows();
   }
 }
 
@@ -71,11 +73,13 @@ offAudio.addEventListener('play', () => {
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
   updateMediaPosition(); 
   bgAudio.play().catch(()=>{}); 
+  refreshTrackRows();
 });
 offAudio.addEventListener('pause', () => { 
   S.playing = false; updateBtn(); 
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   if(typeof savePlaybackState === 'function') savePlaybackState();
+  refreshTrackRows();
 });
 
 const DB_NAME = 'NexoOfflineDB', DB_VER = 1;
@@ -526,6 +530,10 @@ async function toggleLike(t, btn) {
     S.liked.splice(idx,1);
     deleteOfflineAudio(t.id);
     toast('Removed from Liked');
+    // Also reset download buttons to initial state if no longer downloaded
+    document.querySelectorAll(`.track-row[data-track-id="${t.id}"] .tr-dl`).forEach(b => {
+      b.textContent = '\u2B07'; b.classList.remove('downloaded');
+    });
   } else {
     S.liked.unshift(t);
     toast('Added to Liked ❤. Downloading...');
@@ -535,6 +543,10 @@ async function toggleLike(t, btn) {
         const blob = await res.blob();
         await saveOfflineAudio(t.id, blob);
         toast('Saved for offline listening');
+        // Update download buttons for this track
+        document.querySelectorAll(`.track-row[data-track-id="${t.id}"] .tr-dl`).forEach(b => {
+          b.textContent = '\u2713'; b.classList.add('downloaded');
+        });
       } else {
         toast('Failed to download', true);
       }
@@ -677,7 +689,13 @@ function highlightQ() {
     const active=i===S.queueIdx;
     el.classList.toggle('active',active);
     const numEl=el.querySelector('.qi-num');
-    if(numEl) numEl.textContent=active?'\u25b6':i+1;
+    if(numEl) {
+      if (active) {
+        numEl.innerHTML = S.playing ? '&#9654;' : '&#9208;'; // ▶ or ⏸
+      } else {
+        numEl.textContent = i+1;
+      }
+    }
   });
   const activeEl=$('queue-list').querySelector('.queue-item.active');
   if(activeEl) activeEl.scrollIntoView({block:'nearest',behavior:'smooth'});
@@ -689,7 +707,13 @@ function refreshTrackRows() {
     const playing = S.current?.id === id;
     row.classList.toggle('playing', playing);
     const numEl = row.querySelector('.tr-num');
-    if (numEl) numEl.textContent = playing ? '\u25b6' : row.dataset.rowNum;
+    if (numEl) {
+      if (playing) {
+        numEl.innerHTML = S.playing ? '&#9654;' : '&#9208;'; // ▶ or ⏸
+      } else {
+        numEl.textContent = row.dataset.rowNum;
+      }
+    }
   });
   highlightQ();
 }

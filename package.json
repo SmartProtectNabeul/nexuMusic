@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
+    "@supabase/supabase-js": "^2.106.1",
     "play-dl": "^1.9.7",
     "youtubei.js": "^17.0.1"
   }

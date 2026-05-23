@@ -196,6 +196,54 @@ async function ensureYtDlp() {
   await downloadYtDlp();
 }
 
+async function extractAudioUrlFallback(id) {
+  // Try Piped instances
+  const PIPED_INSTANCES = [
+    'https://pipedapi.kavin.rocks',
+    'https://api.piped.projectsegfau.lt',
+    'https://piped-api.garudalinux.org',
+  ];
+  for (const base of PIPED_INSTANCES) {
+    try {
+      console.log(`[extract-fallback] Trying Piped instance: ${base}`);
+      const data = await getJSON(`${base}/streams/${id}`);
+      const streams = (data.audioStreams || [])
+        .filter(s => s.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (streams.length) {
+        console.log(`[extract-fallback] Piped OK (${base}): ${streams[0].mimeType}`);
+        return { url: streams[0].url, mimeType: streams[0].mimeType || 'audio/webm', bitrate: streams[0].bitrate || 128000 };
+      }
+    } catch(e) {
+      console.warn(`[extract-fallback] Piped ${base} failed: ${e.message}`);
+    }
+  }
+
+  // Try Invidious instances
+  const INVIDIOUS_INSTANCES = [
+    'https://invidious.yewtu.be',
+    'https://inv.nadeko.net',
+    'https://invidious.privacydev.net',
+  ];
+  for (const base of INVIDIOUS_INSTANCES) {
+    try {
+      console.log(`[extract-fallback] Trying Invidious instance: ${base}`);
+      const data = await getJSON(`${base}/api/v1/videos/${id}?fields=adaptiveFormats`);
+      const formats = (data.adaptiveFormats || [])
+        .filter(f => f.type?.startsWith('audio/') && f.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (formats.length) {
+        console.log(`[extract-fallback] Invidious OK (${base}): ${formats[0].type}`);
+        return { url: formats[0].url, mimeType: formats[0].type || 'audio/webm', bitrate: formats[0].bitrate || 128000 };
+      }
+    } catch(e) {
+      console.warn(`[extract-fallback] Invidious ${base} failed: ${e.message}`);
+    }
+  }
+
+  throw new Error('All fallback extraction strategies failed');
+}
+
 // ── Shared: extract direct audio CDN URL (cached + deduped) ─────────────────
 async function extractAudioUrl(id) {
   // 1. Cache hit — instant return
@@ -220,14 +268,31 @@ async function extractAudioUrl(id) {
        '--socket-timeout', '8',
        `https://www.youtube.com/watch?v=${id}`],
       { timeout: 22000 },   // built-in execFile timeout — sends SIGTERM
-      (err, stdout) => {
+      async (err, stdout) => {
         pendingExtracts.delete(id);
         if (err) {
-          console.error(`[extract] yt-dlp error for ${id}:`, err.message);
-          return reject(new Error('Audio extraction failed'));
+          console.warn(`[extract] yt-dlp error for ${id}, trying fallback:`, err.message);
+          try {
+            const fbResult = await extractAudioUrlFallback(id);
+            urlCache.set(id, { ...fbResult, expiresAt: Date.now() + CACHE_TTL_MS });
+            return resolve(fbResult);
+          } catch(fbErr) {
+            console.error(`[extract] Fallback also failed for ${id}:`, fbErr.message);
+            return reject(new Error('Audio extraction failed'));
+          }
         }
         const directUrl = (stdout || '').trim().split('\n')[0];
-        if (!directUrl) return reject(new Error('No audio URL from yt-dlp'));
+        if (!directUrl) {
+          console.warn(`[extract] No audio URL from yt-dlp for ${id}, trying fallback`);
+          try {
+            const fbResult = await extractAudioUrlFallback(id);
+            urlCache.set(id, { ...fbResult, expiresAt: Date.now() + CACHE_TTL_MS });
+            return resolve(fbResult);
+          } catch(fbErr) {
+            console.error(`[extract] Fallback also failed for ${id}:`, fbErr.message);
+            return reject(new Error('No audio URL from yt-dlp or fallbacks'));
+          }
+        }
         const result = { url: directUrl, mimeType: 'audio/webm', bitrate: 128000 };
         urlCache.set(id, { ...result, expiresAt: Date.now() + CACHE_TTL_MS });
         console.log(`[extract] SUCCESS for ${id}`);
@@ -239,6 +304,7 @@ async function extractAudioUrl(id) {
   pendingExtracts.set(id, promise);
   return promise;
 }
+
 
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
