@@ -52,10 +52,11 @@ function onYT(e) {
 function updateMediaPosition() {
   if ('mediaSession' in navigator && navigator.mediaSession.setPositionState) {
     try {
-      let dur=0, cur=0;
-      if (isOfflineMode) { dur = offAudio.duration||0; cur = offAudio.currentTime||0; }
-      else if (S.ytReady) { dur = S.ytPlayer.getDuration()||0; cur = S.ytPlayer.getCurrentTime()||0; }
-      if (dur > 0) navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: cur });
+      if (S.ytReady) {
+        const dur = S.ytPlayer.getDuration()||0;
+        const cur = S.ytPlayer.getCurrentTime()||0;
+        if (dur > 0) navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: cur });
+      }
     } catch(e) {}
   }
 }
@@ -63,53 +64,7 @@ function updateMediaPosition() {
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const bgAudio = $('bg-audio');
-const offAudio = $('offline-audio');
-let isOfflineMode = false;
 let _restoredState = null; // set by loadPlaybackState; consumed on first play press
-
-offAudio.addEventListener('ended', () => { S.repeat ? offAudio.play() : nextTrack(); });
-offAudio.addEventListener('play', () => { 
-  S.playing = true; updateBtn(); startLoop(); 
-  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-  updateMediaPosition(); 
-  bgAudio.play().catch(()=>{}); 
-  refreshTrackRows();
-});
-offAudio.addEventListener('pause', () => { 
-  S.playing = false; updateBtn(); 
-  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-  if(typeof savePlaybackState === 'function') savePlaybackState();
-  refreshTrackRows();
-});
-
-const DB_NAME = 'NexoOfflineDB', DB_VER = 1;
-let offlineDB;
-function initOfflineDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onupgradeneeded = e => e.target.result.createObjectStore('tracks', { keyPath: 'id' });
-    req.onsuccess = e => { offlineDB = e.target.result; resolve(); };
-    req.onerror = e => reject(e);
-  });
-}
-async function saveOfflineAudio(id, blob) {
-  if(!offlineDB) await initOfflineDB();
-  const tx = offlineDB.transaction('tracks', 'readwrite');
-  tx.objectStore('tracks').put({ id, blob });
-}
-async function getOfflineAudio(id) {
-  if(!offlineDB) await initOfflineDB();
-  return new Promise(resolve => {
-    const req = offlineDB.transaction('tracks', 'readonly').objectStore('tracks').get(id);
-    req.onsuccess = () => resolve(req.result ? req.result.blob : null);
-    req.onerror = () => resolve(null);
-  });
-}
-async function deleteOfflineAudio(id) {
-  if(!offlineDB) await initOfflineDB();
-  const tx = offlineDB.transaction('tracks', 'readwrite');
-  tx.objectStore('tracks').delete(id);
-}
 
 const fmt = s => { s=Math.floor(s||0); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
 function decH(str) { const t=document.createElement('textarea'); t.innerHTML=str; return t.value; }
@@ -215,54 +170,18 @@ function renderList(container, tracks, queue) {
       <div class="tr-thumb">${thumbHTML(t)}</div>
       <div class="tr-info"><div class="tr-title">${t.title}</div><div class="tr-artist">${t.artist}</div></div>
       <div class="tr-right">
-        <button class="tr-dl" title="Save for offline">&#11015;</button>
         <button class="tr-like${liked?' liked':''}" title="Like">&#9829;</button>
         <span class="tr-duration">${t.duration}</span>
         <button class="tr-more" title="More">&#8943;</button>
       </div>`;
-    // Async: mark already-downloaded tracks
-    getOfflineAudio(t.id).then(blob => {
-      const b = row.querySelector('.tr-dl');
-      if (b && blob) { b.textContent = '\u2713'; b.classList.add('downloaded'); }
-    });
-    row.querySelector('.tr-dl').addEventListener('click', e => { e.stopPropagation(); downloadTrack(t, row.querySelector('.tr-dl')); });
     row.querySelector('.tr-like').addEventListener('click',e=>{e.stopPropagation();toggleLike(t,row.querySelector('.tr-like'));});
     row.querySelector('.tr-more').addEventListener('click',e=>{e.stopPropagation();showCtx(e,t);});
     row.addEventListener('click',e=>{
-      if(e.target.classList.contains('tr-like')||e.target.classList.contains('tr-more')||e.target.classList.contains('tr-dl'))return;
+      if(e.target.classList.contains('tr-like')||e.target.classList.contains('tr-more'))return;
       playQueue(queue,i);
     });
     container.appendChild(row);
   });
-}
-
-// ── Download Track ────────────────────────────────────────────────────────────
-async function downloadTrack(t, btn) {
-  const existing = await getOfflineAudio(t.id);
-  if (existing) {
-    if (btn) { btn.textContent = '\u2713'; btn.classList.add('downloaded'); }
-    toast(`Already saved offline \u2713`);
-    return;
-  }
-  if (btn && btn._downloading) return;
-  if (btn) { btn._downloading = true; btn.textContent = '\u27F3'; btn.disabled = true; }
-  toast(`Downloading “${t.title}”…`);
-  try {
-    const res = await fetch(`${API_BASE}/api/download?id=${t.id}`);
-    if (!res.ok) throw new Error(`Server error ${res.status}`);
-    const blob = await res.blob();
-    if (!blob || blob.size < 2000) throw new Error('Empty audio received');
-    await saveOfflineAudio(t.id, blob);
-    // Update ALL visible download buttons for this track
-    document.querySelectorAll(`.track-row[data-track-id="${t.id}"] .tr-dl`).forEach(b => {
-      b.textContent = '\u2713'; b.classList.add('downloaded'); b.disabled = false; delete b._downloading;
-    });
-    toast(`“${t.title}” saved for offline \u2713`);
-  } catch(e) {
-    console.error('Download error:', e);
-    toast(`Download failed — try again`);
-    if (btn) { btn.textContent = '\u2B07'; btn.classList.remove('downloaded'); btn.disabled = false; delete btn._downloading; }
-  }
 }
 
 // ── Playback ──────────────────────────────────────────────────────────────────
@@ -271,73 +190,24 @@ function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S
 async function playTrack(t, startTime = 0) {
   if (!t) return;
   S.current = t;
-  _audioErrorCount = 0;
 
-  // Stop previous playback immediately
-  offAudio.pause();
-  offAudio.src = '';
-  if (S.ytReady) S.ytPlayer.pauseVideo();
-
-  // Update UI right away — user sees feedback instantly
-  updateNP(); updateBtn(); addRecent(t); refreshTrackRows();
-
-  const blob = await getOfflineAudio(t.id);
-  if (blob) {
-    // ── Downloaded track → HTML <audio> from IndexedDB ───────────────────
-    isOfflineMode = true;
-    offAudio.src = URL.createObjectURL(blob);
+  if (S.ytReady) {
     if (startTime > 0) {
-      offAudio.addEventListener('loadedmetadata', function h() {
-        offAudio.currentTime = startTime;
-        offAudio.removeEventListener('loadedmetadata', h);
-      });
-    }
-    offAudio.play().catch(e => console.error('[play] blob error:', e.message));
-    S.playing = true; updateBtn();
-    bgAudio.play().catch(() => {});
-  } else {
-    // ── Online track → stream via proxy (yt-dlp pipes directly, ~1-2s start) ──
-    isOfflineMode = true;
-    offAudio.src = `${API_BASE}/api/stream?id=${t.id}`;
-    if (startTime > 0) {
-      offAudio.addEventListener('loadedmetadata', function h() {
-        offAudio.currentTime = startTime;
-        offAudio.removeEventListener('loadedmetadata', h);
-      });
-    }
-    offAudio.play().catch(e => console.warn('[play] stream deferred:', e.message));
-    S.playing = true; updateBtn();
-    bgAudio.play().catch(() => {});
-  }
-}
-
-let _audioErrorCount = 0;
-offAudio.addEventListener('error', () => {
-  if (!S.current) return;
-  const err = offAudio.error;
-  // MEDIA_ERR_ABORTED = src was cleared intentionally — ignore
-  if (err && err.code === 1) return;
-  _audioErrorCount++;
-  if (_audioErrorCount > 1) return; // handle once per track
-  if (offAudio.src && offAudio.src.startsWith('blob:')) {
-    toast('Saved track unavailable, skipping…');
-    setTimeout(nextTrack, 500);
-  } else {
-    // Stream failed — fall back to YouTube IFrame player silently
-    console.warn('[offAudio] stream error, falling back to IFrame');
-    isOfflineMode = false;
-    offAudio.src = '';
-    if (S.ytReady) {
-      S.ytPlayer.loadVideoById(S.current.id);
-      S.playing = true;
-      updateBtn();
+      S.ytPlayer.loadVideoById({ videoId: t.id, startSeconds: startTime });
     } else {
-      toast('Playback unavailable, skipping…');
-      setTimeout(nextTrack, 1000);
+      S.ytPlayer.loadVideoById(t.id);
     }
+    S.playing = true;
+    updateBtn();
+    bgAudio.play().catch(() => {});
+  } else {
+    toast('Player loading, please try again...');
   }
-});
-offAudio.addEventListener('play', () => { _audioErrorCount = 0; });
+
+  updateNP();
+  addRecent(t);
+  refreshTrackRows();
+}
 
 function updateNP() {
   const t=S.current; if(!t) return;
@@ -352,20 +222,18 @@ function updateNP() {
       artist: t.artist,
       artwork: [{ src: t.thumb || '', sizes: '512x512', type: 'image/jpeg' }]
     });
-    navigator.mediaSession.setActionHandler('play', () => { if(isOfflineMode) offAudio.play(); else if(S.ytReady) S.ytPlayer.playVideo(); bgAudio.play().catch(()=>{}); });
-    navigator.mediaSession.setActionHandler('pause', () => { if(isOfflineMode) offAudio.pause(); else if(S.ytReady) S.ytPlayer.pauseVideo(); });
+    navigator.mediaSession.setActionHandler('play', () => { if(S.ytReady) S.ytPlayer.playVideo(); bgAudio.play().catch(()=>{}); });
+    navigator.mediaSession.setActionHandler('pause', () => { if(S.ytReady) S.ytPlayer.pauseVideo(); });
     navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
     navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
     navigator.mediaSession.setActionHandler('seekto', (d) => {
-      if(d.seekTime !== undefined) { 
-        if(isOfflineMode) offAudio.currentTime = d.seekTime;
-        else if(S.ytReady) S.ytPlayer.seekTo(d.seekTime); 
+      if(d.seekTime !== undefined && S.ytReady) { 
+        S.ytPlayer.seekTo(d.seekTime); 
         updateMediaPosition(); 
       }
     });
     navigator.mediaSession.setActionHandler('stop', () => {
-      if(isOfflineMode) offAudio.pause();
-      else if(S.ytReady) S.ytPlayer.pauseVideo();
+      if(S.ytReady) S.ytPlayer.pauseVideo();
       if(bgAudio) bgAudio.pause();
       navigator.mediaSession.playbackState = 'none';
       S.playing = false;
@@ -377,15 +245,13 @@ function updateBtn(){ $('icon-play').classList.toggle('hidden',S.playing); $('ic
 $('btn-play-pause').addEventListener('click',()=>{
   if(!S.current) return; // nothing loaded yet
   if (S.playing) {
-    isOfflineMode ? offAudio.pause() : S.ytPlayer?.pauseVideo();
+    S.ytPlayer?.pauseVideo();
   } else {
     if (_restoredState) {
       // First play after page restore — player hasn't been primed yet
       const rs = _restoredState;
       _restoredState = null;
       playTrack(rs.track, rs.time); // resume from saved position
-    } else if (isOfflineMode) {
-      offAudio.play();
     } else {
       S.ytPlayer?.playVideo();
     }
@@ -400,8 +266,8 @@ function nextTrack() {
 }
 function prevTrack() {
   if(!S.queue.length) return;
-  const curTime = isOfflineMode ? offAudio.currentTime : (S.ytPlayer?.getCurrentTime()||0);
-  if(curTime > 3) { isOfflineMode ? (offAudio.currentTime=0) : S.ytPlayer?.seekTo(0); return; }
+  const curTime = S.ytPlayer?.getCurrentTime()||0;
+  if(curTime > 3) { S.ytPlayer?.seekTo(0); return; }
   S.queueIdx=(S.queueIdx-1+S.queue.length)%S.queue.length;
   playTrack(S.queue[S.queueIdx]);
 }
@@ -422,23 +288,19 @@ function startLoop() {
   clearInterval(loopId);
   loopId=setInterval(()=>{
     if(!S.playing||isDraggingProgress) return;
-    let cur = 0, dur = 0;
-    if (isOfflineMode) {
-      cur = offAudio.currentTime; dur = offAudio.duration;
-    } else {
-      if(!S.ytReady) return;
-      cur=S.ytPlayer.getCurrentTime()||0; dur=S.ytPlayer.getDuration()||0;
-    }
+    if(!S.ytReady) return;
+    const cur=S.ytPlayer.getCurrentTime()||0;
+    const dur=S.ytPlayer.getDuration()||0;
     if(!dur) return;
     updateProgressUI((cur/dur)*100, cur, dur);
   }, 100);
 }
 
 function getDuration() {
-  return isOfflineMode ? (offAudio.duration || 0) : (S.ytPlayer?.getDuration() || 0);
+  return S.ytPlayer?.getDuration() || 0;
 }
 
-let _dragDuration = 0; // cached once at drag-start — avoids IFrame bridge calls on every move
+let _dragDuration = 0; // cached once at drag-start
 
 function handleProgressDrag(e) {
   const r = $('progress-bar').getBoundingClientRect();
@@ -464,10 +326,7 @@ $('progress-bar').addEventListener('pointerup', e => {
   isDraggingProgress = false;
   $('progress-bar').releasePointerCapture(e.pointerId);
   const pct = handleProgressDrag(e);
-  if (isOfflineMode) {
-    offAudio.currentTime = pct * _dragDuration;
-    setTimeout(updateMediaPosition, 200);
-  } else if (S.ytReady) {
+  if (S.ytReady) {
     S.ytPlayer.seekTo(pct * _dragDuration);
     setTimeout(updateMediaPosition, 200);
   }
@@ -479,7 +338,6 @@ let isDraggingVolume = false;
 function ytVol(v) {
   S.volume=Math.max(0,Math.min(100,v)); 
   if(S.ytReady) S.ytPlayer.setVolume(S.volume);
-  offAudio.volume = S.volume / 100;
   $('volume-fill').style.width=S.volume+'%'; $('volume-thumb').style.left=S.volume+'%';
 }
 
@@ -507,7 +365,6 @@ $('volume-bar').addEventListener('pointerup', e => {
 $('btn-mute').addEventListener('click',()=>{
   S.muted=!S.muted; 
   S.ytReady&&(S.muted?S.ytPlayer.mute():S.ytPlayer.unMute());
-  offAudio.muted = S.muted;
   $('icon-volume').classList.toggle('hidden',S.muted); $('icon-muted').classList.toggle('hidden',!S.muted);
 });
 
@@ -516,29 +373,10 @@ async function toggleLike(t, btn) {
   const idx=S.liked.findIndex(l=>l.id===t.id);
   if(idx>-1){
     S.liked.splice(idx,1);
-    deleteOfflineAudio(t.id);
     toast('Removed from Liked');
-    // Also reset download buttons to initial state if no longer downloaded
-    document.querySelectorAll(`.track-row[data-track-id="${t.id}"] .tr-dl`).forEach(b => {
-      b.textContent = '\u2B07'; b.classList.remove('downloaded');
-    });
   } else {
     S.liked.unshift(t);
-    toast('Added to Liked ❤. Downloading...');
-    try {
-      const res = await fetch(`${API_BASE}/api/download?id=${t.id}`);
-      if(res.ok) {
-        const blob = await res.blob();
-        await saveOfflineAudio(t.id, blob);
-        toast('Saved for offline listening');
-        // Update download buttons for this track
-        document.querySelectorAll(`.track-row[data-track-id="${t.id}"] .tr-dl`).forEach(b => {
-          b.textContent = '\u2713'; b.classList.add('downloaded');
-        });
-      } else {
-        toast('Failed to download', true);
-      }
-    } catch(e) { console.error('offline err', e); }
+    toast('Added to Liked ❤');
   }
   save(); $('liked-count').textContent=`${S.liked.length} songs`;
   if(btn) btn.classList.toggle('liked',idx===-1);
@@ -715,7 +553,6 @@ function refreshTrackRows() {
   highlightQ();
 }
 
-
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 document.addEventListener('keydown',e=>{
   if(['INPUT','TEXTAREA'].includes(e.target.tagName)) return;
@@ -849,10 +686,7 @@ $('btn-logout').addEventListener('click', () => {
 // ── Persistence ───────────────────────────────────────────────────────────────
 function savePlaybackState() {
   if (!S.current) return;
-  // Pick the right time source depending on which player is active
-  const time = isOfflineMode
-    ? (offAudio.currentTime || 0)
-    : (S.ytPlayer?.getCurrentTime?.() || 0);
+  const time = S.ytPlayer?.getCurrentTime?.() || 0;
   localStorage.setItem('nx_playbackState', JSON.stringify({
     queue: S.queue, queueIdx: S.queueIdx,
     current: S.current, time, volume: S.volume
@@ -878,25 +712,7 @@ function loadPlaybackState() {
     // Restore UI immediately (paused) — user presses play to resume
     updateNP(); updateBtn(); renderQueue(); highlightQ();
 
-    getOfflineAudio(S.current.id).then(blob => {
-      if (blob) {
-        // Downloaded track: load into HTML audio at the saved position
-        isOfflineMode = true;
-        _restoredState = null; // no flag needed — audio element is primed
-        offAudio.src = URL.createObjectURL(blob);
-        offAudio.addEventListener('loadedmetadata', function onMeta() {
-          offAudio.currentTime = saved.time || 0;
-          updateProgressUI(((saved.time||0)/(offAudio.duration||1))*100, saved.time, offAudio.duration);
-          offAudio.removeEventListener('loadedmetadata', onMeta);
-        });
-        // Do NOT call offAudio.play() — let user press play
-      } else {
-        // Not downloaded: mark as a pending restore so the play button
-        // triggers a full playTrack() call instead of a no-op playVideo()
-        isOfflineMode = false;
-        _restoredState = { track: saved.current, time: saved.time || 0 };
-      }
-    });
+    _restoredState = { track: saved.current, time: saved.time || 0 };
   } catch(e) {}
 }
 

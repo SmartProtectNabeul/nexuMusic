@@ -1,20 +1,10 @@
-const http    = require('http');
-const https   = require('https');
-const fs      = require('fs');
-const path    = require('path');
-const { execFile, spawn } = require('child_process');
+const http  = require('http');
+const https = require('https');
+const fs    = require('fs');
+const path  = require('path');
 
 const PORT = 3000;
 const DIR  = __dirname;
-
-const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-const BIN_PATH = path.join(DIR, BIN_NAME);
-
-// ── URL cache + dedup (used only for /api/download) ──────────────────────────
-const urlCache        = new Map(); // id → { url, mimeType, expiresAt }
-const pendingExtracts = new Map(); // id → Promise
-const CACHE_TTL_MS    = 45 * 60 * 1000; // 45 min
-
 const MIME = {
   '.html':'text/html', '.css':'text/css', '.js':'application/javascript',
   '.json':'application/json', '.ico':'image/x-icon', '.png':'image/png',
@@ -58,31 +48,6 @@ function postJSON(url, body) {
     req.on('error', reject);
     req.setTimeout(12000, () => { req.destroy(); reject(new Error('timeout')); });
     req.write(bodyStr);
-    req.end();
-  });
-}
-
-// Simple GET → parsed JSON helper (used by extractAudioUrl strategies)
-function getJSON(url, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = https.request({
-      hostname: u.hostname, path: u.pathname + u.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        ...extraHeaders,
-      },
-    }, res => {
-      let data = '';
-      res.on('data', d => data += d);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error(`Invalid JSON from ${u.hostname}`)); }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error('timeout')); });
     req.end();
   });
 }
@@ -151,212 +116,17 @@ async function ytTrending() {
   return await ytSearch('Top Hits Music Playlist 2024');
 }
 
-function downloadYtDlp() {
-  return new Promise((resolve, reject) => {
-    console.log('[ensureYtDlp] Downloading yt-dlp binary from GitHub...');
-    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${BIN_NAME}`;
-    const file = fs.createWriteStream(BIN_PATH);
-    
-    function get(u) {
-      https.get(u, (res) => {
-        if ([301, 302, 307, 308].includes(res.statusCode)) {
-          get(res.headers.location);
-        } else if (res.statusCode === 200) {
-          res.pipe(file);
-          file.on('finish', () => {
-            file.close();
-            if (process.platform !== 'win32') {
-              fs.chmodSync(BIN_PATH, 0o755);
-            }
-            console.log('[ensureYtDlp] Download complete.');
-            resolve();
-          });
-        } else {
-          reject(new Error(`Failed with status: ${res.statusCode}`));
-        }
-      }).on('error', (err) => {
-        reject(err);
-      });
-    }
-    
-    get(url);
-  });
-}
-
-async function ensureYtDlp() {
-  if (fs.existsSync(BIN_PATH)) {
-    const stats = fs.statSync(BIN_PATH);
-    if (stats.size > 1000) {
-      console.log(`[ensureYtDlp] yt-dlp binary verified at: ${BIN_PATH}`);
-      return;
-    }
-    console.warn(`[ensureYtDlp] yt-dlp file is corrupted or too small (${stats.size} bytes). Re-downloading...`);
-    try { fs.unlinkSync(BIN_PATH); } catch(e) {}
-  }
-  await downloadYtDlp();
-}
-
-let healthyInvidiousInstances = [];
-const BACKUP_INVIDIOUS = [
-  'https://inv.thepixora.com',
-  'https://invidious.nerdvpn.de',
-  'https://invidious.flokinet.to',
-  'https://invidious.privacydev.net'
-];
-
-async function refreshInvidiousInstances() {
-  try {
-    console.log('[instances] Fetching fresh Invidious instances list...');
-    const list = await getJSON('https://api.invidious.io/instances.json');
-    if (!Array.isArray(list)) return;
-    const parsed = list
-      .map(item => {
-        const domain = item[0];
-        const stats = item[1];
-        return { domain, ...stats };
-      })
-      .filter(inst => {
-        const isHttps = inst.type === 'https';
-        const isHealthy = inst.monitor && inst.monitor.enabled === true && inst.monitor.last_status === 200;
-        // Skip instances that disable API or have issues
-        const isBlacklisted = ['nadeko.net'].some(b => inst.domain.includes(b));
-        return isHttps && isHealthy && inst.domain && !isBlacklisted;
-      })
-      .map(inst => inst.uri || `https://${inst.domain}`);
-    if (parsed.length) {
-      healthyInvidiousInstances = parsed;
-      console.log(`[instances] Loaded ${parsed.length} healthy Invidious instances!`);
-    }
-  } catch(e) {
-    console.warn('[instances] Failed to fetch dynamic instances list:', e.message);
-  }
-}
-
-async function extractAudioUrlFallback(id) {
-  // If we don't have any dynamically loaded instances, try fetching them once!
-  if (!healthyInvidiousInstances || !healthyInvidiousInstances.length) {
-    await refreshInvidiousInstances();
-  }
-  
-  // Combine dynamically fetched instances with our hardcoded backup instances (deduplicated)
-  const instances = [...new Set([...(healthyInvidiousInstances || []), ...BACKUP_INVIDIOUS])];
-  console.log(`[extract-fallback] Waterfalling through ${instances.length} active Invidious instances for ID: ${id}`);
-
-  for (const base of instances) {
-    try {
-      console.log(`[extract-fallback] Querying Invidious instance: ${base}`);
-      const data = await getJSON(`${base}/api/v1/videos/${id}?fields=adaptiveFormats`);
-      const formats = (data.adaptiveFormats || [])
-        .filter(f => f.type?.startsWith('audio/') && f.url)
-        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-      if (formats.length) {
-        console.log(`[extract-fallback] Invidious SUCCESS via ${base}!`);
-        return { url: formats[0].url, mimeType: formats[0].type || 'audio/webm', bitrate: formats[0].bitrate || 128000 };
-      }
-    } catch(e) {
-      console.warn(`[extract-fallback] Instance ${base} failed: ${e.message}`);
-    }
-  }
-
-  throw new Error('All fallback extraction strategies failed');
-}
-
-// ── Shared: extract direct audio CDN URL (cached + deduped) ─────────────────
-async function extractAudioUrl(id) {
-  // 1. Cache hit — instant return
-  const cached = urlCache.get(id);
-  if (cached && cached.expiresAt > Date.now()) {
-    console.log(`[extract] Cache HIT for ${id}`);
-    return { url: cached.url, mimeType: cached.mimeType, bitrate: cached.bitrate };
-  }
-  // 2. Dedup — join in-flight extraction instead of spawning another yt-dlp
-  if (pendingExtracts.has(id)) {
-    console.log(`[extract] Dedup: joining in-flight request for ${id}`);
-    return pendingExtracts.get(id);
-  }
-
-  await ensureYtDlp();
-
-  const promise = new Promise((resolve, reject) => {
-    console.log(`[extract] Running yt-dlp for ${id}...`);
-    execFile(
-      BIN_PATH,
-      ['-f', 'bestaudio', '--print', '%(ext)s|%(url)s', '--no-playlist', '--no-warnings',
-       '--socket-timeout', '8',
-       `https://www.youtube.com/watch?v=${id}`],
-      { timeout: 22000 },   // built-in execFile timeout — sends SIGTERM
-      async (err, stdout) => {
-        pendingExtracts.delete(id);
-        if (err) {
-          console.warn(`[extract] yt-dlp error for ${id}, trying fallback:`, err.message);
-          try {
-            const fbResult = await extractAudioUrlFallback(id);
-            urlCache.set(id, { ...fbResult, expiresAt: Date.now() + CACHE_TTL_MS });
-            return resolve(fbResult);
-          } catch(fbErr) {
-            console.error(`[extract] Fallback also failed for ${id}:`, fbErr.message);
-            return reject(new Error('Audio extraction failed'));
-          }
-        }
-        const stdoutStr = (stdout || '').trim();
-        const separatorIdx = stdoutStr.indexOf('|');
-        let ext = '';
-        let directUrl = '';
-        if (separatorIdx !== -1) {
-          ext = stdoutStr.slice(0, separatorIdx).trim();
-          directUrl = stdoutStr.slice(separatorIdx + 1).trim();
-        } else {
-          directUrl = stdoutStr.split('\n')[0];
-        }
-
-        if (!directUrl) {
-          console.warn(`[extract] No audio URL from yt-dlp for ${id}, trying fallback`);
-          try {
-            const fbResult = await extractAudioUrlFallback(id);
-            urlCache.set(id, { ...fbResult, expiresAt: Date.now() + CACHE_TTL_MS });
-            return resolve(fbResult);
-          } catch(fbErr) {
-            console.error(`[extract] Fallback also failed for ${id}:`, fbErr.message);
-            return reject(new Error('No audio URL from yt-dlp or fallbacks'));
-          }
-        }
-
-        let mimeType = 'audio/webm';
-        if (ext === 'm4a' || ext === 'mp4') {
-          mimeType = 'audio/mp4';
-        } else if (ext === 'webm') {
-          mimeType = 'audio/webm';
-        } else if (ext === 'ogg') {
-          mimeType = 'audio/ogg';
-        }
-
-        const result = { url: directUrl, mimeType, bitrate: 128000 };
-        urlCache.set(id, { ...result, expiresAt: Date.now() + CACHE_TTL_MS });
-        console.log(`[extract] SUCCESS for ${id} (ext=${ext}, mime=${mimeType})`);
-        resolve(result);
-      }
-    );
-  });
-
-  pendingExtracts.set(id, promise);
-  return promise;
-}
-
-
-
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://localhost:${PORT}`);
   const p = u.pathname;
 
-  // Always allow CORS from any origin
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Disposition');
+  const origin = req.headers.origin;
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
@@ -375,7 +145,7 @@ const server = http.createServer(async (req, res) => {
   rl.count++;
   global.rateLimit.set(ip, rl);
 
-  if (rl.count > 200) { // Max 200 requests per minute per IP
+  if (rl.count > 50) { // Max 50 requests per minute per IP
     return json({ error: 'Too many requests. Please try again later.' }, 429);
   }
 
@@ -411,152 +181,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-
-  // ── /api/download ────────────────────────────────────────────────────────
-  if (p === '/api/download') {
-    const id = u.searchParams.get('id');
-    if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
-    try {
-      console.log(`[download] ${id}`);
-      const fmt = await extractAudioUrl(id);
-      console.log(`[download] → piping ${fmt.mimeType}`);
-      https.get(fmt.url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-          'Referer': 'https://www.youtube.com/',
-          'Origin': 'https://www.youtube.com',
-        }
-      }, audioRes => {
-        const fileExt = fmt.mimeType === 'audio/mp4' ? 'm4a' : 'webm';
-        res.writeHead(200, {
-          'Content-Type': fmt.mimeType || 'audio/webm',
-          'Content-Length': audioRes.headers['content-length'] || '',
-          'Content-Disposition': `attachment; filename="${id}.${fileExt}"`,
-          'Access-Control-Allow-Origin': '*',
-        });
-        audioRes.pipe(res);
-        audioRes.on('error', e => { console.error('[download] pipe error:', e.message); res.end(); });
-      }).on('error', e => {
-        console.error('[download] CDN error:', e.message);
-        if (!res.headersSent) json({ error: 'CDN fetch failed' }, 502);
-      });
-    } catch(e) {
-      console.error('[download] error:', e.message);
-      if (!res.headersSent) json({ error: e.message }, 502);
-    }
-    return;
-  }
-
-  // ── /api/stream ──────────────────────────────────────────────────────────
-  //
-  // TWO modes depending on whether the client sends a Range header:
-  //
-  //  • No Range header (initial play):
-  //      Spawn yt-dlp with -o - and pipe stdout straight to the response.
-  //      First audio bytes arrive in ~1-2 s.
-  //      Also kicks off extractAudioUrl() in the background so the CDN URL
-  //      is cached and ready by the time the user tries to seek.
-  //
-  //  • Range header (seek):
-  //      Forward the byte-range request to the cached YouTube CDN URL.
-  //      This is instant when the URL is already cached, otherwise waits
-  //      for extractAudioUrl to finish (usually done before user can seek).
-  //
-  if (p === '/api/stream') {
-    const id = u.searchParams.get('id');
-    if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
-
-    await ensureYtDlp();
-    const rangeHeader = req.headers.range;
-
-    // Detect a real seek: Range header with a non-zero start byte.
-    // "bytes=0-" is just the browser's initial probe — treat it like no range.
-    const rangeStart = rangeHeader ? parseInt((rangeHeader.match(/bytes=(\d+)-/) || [])[1] || '0', 10) : 0;
-    const isRealSeek = rangeHeader && rangeStart > 0;
-
-    if (isRealSeek) {
-      // ── Seek / Range request ───────────────────────────────────────────────
-      console.log(`[stream] seek range for ${id}: ${rangeHeader} (start=${rangeStart})`);
-      try {
-        const fmt = await extractAudioUrl(id); // instant if already cached
-        https.get(fmt.url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-            'Referer':    'https://www.youtube.com/',
-            'Origin':     'https://www.youtube.com',
-            'Range':      rangeHeader,
-          },
-        }, audioRes => {
-          const outHeaders = {
-            'Content-Type':  fmt.mimeType || 'audio/webm',
-            'Accept-Ranges': 'bytes',
-            'Access-Control-Allow-Origin': '*',
-          };
-          if (audioRes.headers['content-length']) outHeaders['Content-Length'] = audioRes.headers['content-length'];
-          if (audioRes.headers['content-range'])  outHeaders['Content-Range']  = audioRes.headers['content-range'];
-          res.writeHead(audioRes.statusCode || 206, outHeaders);
-          audioRes.pipe(res);
-          audioRes.on('error', e => { if (!res.writableEnded) res.end(); });
-        }).on('error', e => {
-          console.error('[stream] CDN range error:', e.message);
-          if (!res.headersSent) json({ error: 'CDN range fetch failed' }, 502);
-        });
-      } catch (e) {
-        console.error('[stream] range extract error:', e.message);
-        if (!res.headersSent) json({ error: e.message }, 502);
-      }
-      return;
-    }
-
-    // ── Initial play (no Range header) ────────────────────────────────────────
-    console.log(`[stream] direct pipe for ${id}`);
-
-    // Fire URL extraction in background so seeks will be instant later.
-    // The dedup map ensures only one yt-dlp -g runs even if called twice.
-    extractAudioUrl(id).catch(() => {});
-
-    res.writeHead(200, {
-      'Content-Type':      'audio/mp4',
-      'Transfer-Encoding': 'chunked',
-      'Accept-Ranges':     'bytes',   // tell browser seeking is supported
-      'Cache-Control':     'no-cache',
-      'Access-Control-Allow-Origin': '*',
-    });
-
-    const ytdlp = spawn(BIN_PATH, [
-      '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-      '--no-playlist', '--no-warnings', '--quiet',
-      '-o', '-',
-      '--socket-timeout', '10',
-      `https://www.youtube.com/watch?v=${id}`,
-    ]);
-
-    let bytesWritten = 0;
-    ytdlp.stdout.on('data', chunk => {
-      bytesWritten += chunk.length;
-      if (!res.writableEnded) res.write(chunk);
-    });
-    ytdlp.on('close', code => {
-      console.log(`[stream] done (code=${code}, bytes=${bytesWritten}) for ${id}`);
-      if (!res.writableEnded) res.end();
-    });
-    ytdlp.on('error', e => {
-      console.error('[stream] spawn error:', e.message);
-      if (!res.writableEnded) res.end();
-    });
-    req.on('close', () => {
-      if (!ytdlp.killed) { ytdlp.kill('SIGTERM'); }
-    });
-    return;
-  }
-
-  if (p === '/api/log') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => { console.log('\n--- BROWSER ERROR ---\n', body, '\n-------------------\n'); res.end(); });
-    return;
-  }
-
   // ── Static files ─────────────────────────────────────────────────────────
   const filePath = path.join(DIR, p === '/' ? 'index.html' : p);
   const ext = path.extname(filePath);
@@ -567,19 +191,8 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.listen(PORT, async () => {
+server.listen(PORT, () => {
   const { exec } = require('child_process');
   console.log(`\n🎵 NexoMusic → http://localhost:${PORT}\n`);
-  
-  // Dynamically fetch and pre-populate invidious list on boot
-  refreshInvidiousInstances().catch(()=>{});
-
-  try {
-    await ensureYtDlp();
-    console.log('[NexoMusic] yt-dlp is ready for extraction!');
-  } catch(e) {
-    console.error('[NexoMusic] WARNING: Failed to initialize yt-dlp on boot:', e.message);
-  }
-  
   exec(`start http://localhost:${PORT}`);
 });
