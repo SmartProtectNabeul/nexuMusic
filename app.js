@@ -195,10 +195,6 @@ async function doSearch(q) {
     const tracks = items.map(toTrack).filter(t=>t.id);
     $('results-count').textContent=`${tracks.length} results`;
     renderList(res, tracks, tracks);
-    // Pre-warm the top 5 results so they start instantly when clicked
-    tracks.slice(0, 5).forEach(t => {
-      fetch(`${API_BASE}/api/warmup?id=${t.id}`).catch(() => {});
-    });
   } catch(err) {
     load.classList.add('hidden');
     res.innerHTML=`<div class="empty-state"><div class="empty-icon">⚠️</div><h3>Search failed</h3><p>${err.message}</p></div>`;
@@ -273,131 +269,62 @@ async function downloadTrack(t, btn) {
 function playQueue(tracks,idx){ S.queue=[...tracks]; S.queueIdx=idx; playTrack(S.queue[idx]); renderQueue(); }
 // startTime (seconds) is optional — used when restoring a saved position
 async function playTrack(t, startTime = 0) {
-  if(!t) return;
+  if (!t) return;
   S.current = t;
-  _audioErrorCount = 0; // reset for every new track
+  _audioErrorCount = 0;
 
-  // Stop whatever is currently playing
+  // Stop previous playback immediately
   offAudio.pause();
-  offAudio.src = ''; // clear previous src to cancel pending load
+  offAudio.src = '';
   if (S.ytReady) S.ytPlayer.pauseVideo();
 
-  // Update UI immediately so the user sees feedback right away
+  // Update UI right away — user sees feedback instantly
   updateNP(); updateBtn(); addRecent(t); refreshTrackRows();
 
   const blob = await getOfflineAudio(t.id);
   if (blob) {
-    // ── Offline / downloaded track → use HTML <audio> ───────────────────────
+    // ── Downloaded track → HTML <audio> from IndexedDB ───────────────────
     isOfflineMode = true;
     offAudio.src = URL.createObjectURL(blob);
     if (startTime > 0) {
-      const onMeta = () => {
+      offAudio.addEventListener('loadedmetadata', function h() {
         offAudio.currentTime = startTime;
-        offAudio.removeEventListener('loadedmetadata', onMeta);
-      };
-      offAudio.addEventListener('loadedmetadata', onMeta);
+        offAudio.removeEventListener('loadedmetadata', h);
+      });
     }
-    offAudio.play().catch(e => { console.error('Play error', e); });
-    S.playing = true;
-    bgAudio.play().catch(()=>{});
-    updateBtn();
+    offAudio.play().catch(e => console.error('[play] blob error:', e.message));
+    S.playing = true; updateBtn();
+    bgAudio.play().catch(() => {});
   } else {
-    // ── Online track → call /api/warmup first so yt-dlp finishes before
-    //    the browser tries to load the stream URL. This eliminates the
-    //    'streaming failed' flash and mid-song skip caused by the browser
-    //    hitting the endpoint before the CDN URL is ready.
+    // ── Online track → stream via proxy (yt-dlp pipes directly, ~1-2s start) ──
     isOfflineMode = true;
-    S.playing = true;
-    updateBtn();
-
-    // Show a loading indicator in NP title while yt-dlp extracts the URL
-    const npTitle = $('np-title');
-    const originalTitle = t.title;
-    npTitle.textContent = `⏳ Loading…`;
-    npTitle.style.opacity = '0.6';
-
-    try {
-      // Call warmup — blocks until the CDN URL is cached.
-      // We give it up to 30 s; after that we set the src anyway.
-      const warmupCtrl = new AbortController();
-      const warmupTimer = setTimeout(() => warmupCtrl.abort(), 30000);
-      try {
-        await fetch(`${API_BASE}/api/warmup?id=${t.id}`, { signal: warmupCtrl.signal });
-      } catch(we) {
-        // timeout or network error — just proceed
-      }
-      clearTimeout(warmupTimer);
-    } catch(e) { /* swallow */ }
-
-    // Restore title
-    npTitle.textContent = originalTitle;
-    npTitle.style.opacity = '';
-
-    // Guard: if the user already clicked a different track while we awaited,
-    // don't hijack the player.
-    if (S.current !== t) return;
-
     offAudio.src = `${API_BASE}/api/stream?id=${t.id}`;
-
     if (startTime > 0) {
-      const onMeta = () => {
+      offAudio.addEventListener('loadedmetadata', function h() {
         offAudio.currentTime = startTime;
-        offAudio.removeEventListener('loadedmetadata', onMeta);
-      };
-      offAudio.addEventListener('loadedmetadata', onMeta);
+        offAudio.removeEventListener('loadedmetadata', h);
+      });
     }
-
-    offAudio.play().catch(e => {
-      console.warn('[offAudio] Play request deferred or interrupted:', e.message);
-    });
-
-    bgAudio.play().catch(()=>{});
+    offAudio.play().catch(e => console.warn('[play] stream deferred:', e.message));
+    S.playing = true; updateBtn();
+    bgAudio.play().catch(() => {});
   }
-
-  prewarmNextTrack();
-}
-
-function prewarmNextTrack() {
-  if (!S.queue.length || S.queueIdx === -1) return;
-  // Pre-extract audio URLs for the next 2 tracks so they start instantly
-  [1, 2].forEach(offset => {
-    const idx = (S.queueIdx + offset) % S.queue.length;
-    const t = S.queue[idx];
-    if (t) {
-      console.log(`[prewarm] Warming up: ${t.title}`);
-      fetch(`${API_BASE}/api/warmup?id=${t.id}`).catch(() => {});
-    }
-  });
 }
 
 let _audioErrorCount = 0;
 offAudio.addEventListener('error', () => {
   if (!S.current) return;
   const err = offAudio.error;
-  if (err && err.code === 1) { // MEDIA_ERR_ABORTED — harmless, src was changed
-    console.log('[offAudio] Aborted (harmless, src changed).');
-    return;
-  }
+  // MEDIA_ERR_ABORTED = src was cleared intentionally — ignore
+  if (err && err.code === 1) return;
   _audioErrorCount++;
-  if (_audioErrorCount > 3) return; // only retry 3 times per track
+  if (_audioErrorCount > 1) return; // handle once per track
   if (offAudio.src && offAudio.src.startsWith('blob:')) {
-    toast('Saved track unavailable, skipping...');
+    toast('Saved track unavailable, skipping…');
     setTimeout(nextTrack, 500);
   } else {
-    // Retry the stream up to 2 times before falling back
-    if (_audioErrorCount <= 2) {
-      console.warn(`[offAudio] Stream error (code ${err ? err.code : '?'}), retry #${_audioErrorCount}...`);
-      const retryDelay = _audioErrorCount * 1500;
-      setTimeout(() => {
-        if (S.current && isOfflineMode) {
-          offAudio.load(); // re-trigger load on same src
-          offAudio.play().catch(() => {});
-        }
-      }, retryDelay);
-      return;
-    }
-    // After 2 retries, fall back to YouTube IFrame silently
-    console.warn('[offAudio] Stream failed after retries, falling back to IFrame...');
+    // Stream failed — fall back to YouTube IFrame player silently
+    console.warn('[offAudio] stream error, falling back to IFrame');
     isOfflineMode = false;
     offAudio.src = '';
     if (S.ytReady) {
@@ -405,7 +332,7 @@ offAudio.addEventListener('error', () => {
       S.playing = true;
       updateBtn();
     } else {
-      toast('Audio unavailable, skipping...');
+      toast('Playback unavailable, skipping…');
       setTimeout(nextTrack, 1000);
     }
   }

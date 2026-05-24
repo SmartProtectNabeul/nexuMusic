@@ -1,8 +1,8 @@
-const http  = require('http');
-const https = require('https');
-const fs    = require('fs');
-const path  = require('path');
-const { execFile } = require('child_process');
+const http    = require('http');
+const https   = require('https');
+const fs      = require('fs');
+const path    = require('path');
+const { execFile, spawn } = require('child_process');
 
 const PORT = 3000;
 const DIR  = __dirname;
@@ -10,10 +10,10 @@ const DIR  = __dirname;
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 const BIN_PATH = path.join(DIR, BIN_NAME);
 
-// ── URL cache + dedup ────────────────────────────────────────────────────────
-const urlCache       = new Map(); // id → { url, mimeType, bitrate, expiresAt }
-const pendingExtracts = new Map(); // id → Promise  (dedup in-flight requests)
-const CACHE_TTL_MS   = 45 * 60 * 1000; // 45 min (YouTube CDN URLs last ~6 h)
+// ── URL cache + dedup (used only for /api/download) ──────────────────────────
+const urlCache        = new Map(); // id → { url, mimeType, expiresAt }
+const pendingExtracts = new Map(); // id → Promise
+const CACHE_TTL_MS    = 45 * 60 * 1000; // 45 min
 
 const MIME = {
   '.html':'text/html', '.css':'text/css', '.js':'application/javascript',
@@ -392,26 +392,6 @@ const server = http.createServer(async (req, res) => {
   }
 
 
-  // ── /api/warmup  (pre-extract audio URL into cache, BLOCKS until ready) ──
-  if (p === '/api/warmup') {
-    const id = u.searchParams.get('id');
-    if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ ok: false }, 400);
-    // If already cached, respond immediately
-    const cached = urlCache.get(id);
-    if (cached && cached.expiresAt > Date.now()) {
-      return json({ ok: true, cached: true });
-    }
-    // Otherwise, await extraction so the client knows the URL is ready
-    try {
-      await extractAudioUrl(id);
-      console.log(`[warmup] pre-extracted ${id}`);
-      return json({ ok: true, cached: false });
-    } catch(e) {
-      console.warn(`[warmup] failed for ${id}:`, e.message);
-      return json({ ok: false, error: e.message }, 502);
-    }
-  }
-
   // ── /api/download ────────────────────────────────────────────────────────
   if (p === '/api/download') {
     const id = u.searchParams.get('id');
@@ -419,9 +399,7 @@ const server = http.createServer(async (req, res) => {
     try {
       console.log(`[download] ${id}`);
       const fmt = await extractAudioUrl(id);
-      console.log(`[download] → ${fmt.mimeType} @ ${fmt.bitrate}bps`);
-
-      // Pipe directly from YouTube's CDN to the client
+      console.log(`[download] → piping ${fmt.mimeType}`);
       https.get(fmt.url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
@@ -430,74 +408,77 @@ const server = http.createServer(async (req, res) => {
         }
       }, audioRes => {
         res.writeHead(200, {
-          'Content-Type': fmt.mimeType || 'audio/mp4',
+          'Content-Type': fmt.mimeType || 'audio/webm',
           'Content-Length': audioRes.headers['content-length'] || '',
-          'Content-Disposition': `attachment; filename="${id}.m4a"`,
-          'Accept-Ranges': 'bytes',
+          'Content-Disposition': `attachment; filename="${id}.webm"`,
           'Access-Control-Allow-Origin': '*',
         });
         audioRes.pipe(res);
-        audioRes.on('error', err => { console.error('[download] pipe error:', err.message); res.end(); });
-      }).on('error', err => {
-        console.error('[download] CDN fetch error:', err.message);
+        audioRes.on('error', e => { console.error('[download] pipe error:', e.message); res.end(); });
+      }).on('error', e => {
+        console.error('[download] CDN error:', e.message);
         if (!res.headersSent) json({ error: 'CDN fetch failed' }, 502);
       });
-    } catch(err) {
-      console.error('[download] error:', err.message);
-      if (!res.headersSent) json({ error: err.message }, 502);
+    } catch(e) {
+      console.error('[download] error:', e.message);
+      if (!res.headersSent) json({ error: e.message }, 502);
     }
     return;
   }
 
-  // ── /api/stream ──────────────────────────────────────────────────────────
+  // ── /api/stream  ─────────────────────────────────────────────────────────
+  // Pipes yt-dlp stdout DIRECTLY to the HTTP response.
+  // First audio bytes arrive in ~1-2 s — no URL-extraction round-trip.
   if (p === '/api/stream') {
     const id = u.searchParams.get('id');
     if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
-    try {
-      console.log(`[stream] ${id}`);
-      const fmt = await extractAudioUrl(id);
-      console.log(`[stream] → piping ${fmt.mimeType} @ ${fmt.bitrate}bps`);
 
-      const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Origin': 'https://www.youtube.com',
-      };
+    await ensureYtDlp();
+    console.log(`[stream] direct pipe for ${id}`);
 
-      if (req.headers.range) {
-        headers['Range'] = req.headers.range;
+    // Write headers immediately so the browser knows a stream is coming
+    res.writeHead(200, {
+      'Content-Type': 'audio/webm',
+      'Transfer-Encoding': 'chunked',
+      'Accept-Ranges': 'none',
+      'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    const ytdlp = spawn(BIN_PATH, [
+      '-f', 'bestaudio[ext=webm]/bestaudio/best',
+      '--no-playlist',
+      '--no-warnings',
+      '--quiet',
+      '-o', '-',                    // output to stdout
+      '--socket-timeout', '10',
+      `https://www.youtube.com/watch?v=${id}`,
+    ]);
+
+    let bytesWritten = 0;
+    ytdlp.stdout.on('data', chunk => {
+      bytesWritten += chunk.length;
+      if (!res.writableEnded) res.write(chunk);
+    });
+
+    ytdlp.on('close', code => {
+      console.log(`[stream] yt-dlp closed (code=${code}, bytes=${bytesWritten}) for ${id}`);
+      if (!res.writableEnded) res.end();
+    });
+
+    ytdlp.on('error', e => {
+      console.error('[stream] spawn error:', e.message);
+      if (!res.writableEnded) res.end();
+    });
+
+    // If the client disconnects, kill yt-dlp immediately
+    req.on('close', () => {
+      if (!ytdlp.killed) {
+        ytdlp.kill('SIGTERM');
+        console.log(`[stream] client disconnected, killed yt-dlp for ${id}`);
       }
+    });
 
-      https.get(fmt.url, { headers }, audioRes => {
-        const responseHeaders = {
-          'Content-Type': fmt.mimeType || 'audio/webm',
-          'Accept-Ranges': 'bytes',
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Headers': '*',
-        };
-
-        if (audioRes.headers['content-length']) {
-          responseHeaders['Content-Length'] = audioRes.headers['content-length'];
-        }
-        if (audioRes.headers['content-range']) {
-          responseHeaders['Content-Range'] = audioRes.headers['content-range'];
-        }
-
-        res.writeHead(audioRes.statusCode || 200, responseHeaders);
-        audioRes.pipe(res);
-        
-        audioRes.on('error', err => {
-          console.error('[stream] pipe error:', err.message);
-          res.end();
-        });
-      }).on('error', err => {
-        console.error('[stream] CDN fetch error:', err.message);
-        if (!res.headersSent) json({ error: 'CDN fetch failed' }, 502);
-      });
-    } catch(err) {
-      console.error('[stream] error:', err.message);
-      if (!res.headersSent) json({ error: err.message }, 502);
-    }
     return;
   }
 
