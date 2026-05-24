@@ -13,7 +13,7 @@ const BIN_PATH = path.join(DIR, BIN_NAME);
 // ── URL cache + dedup ────────────────────────────────────────────────────────
 const urlCache       = new Map(); // id → { url, mimeType, bitrate, expiresAt }
 const pendingExtracts = new Map(); // id → Promise  (dedup in-flight requests)
-const CACHE_TTL_MS   = 5 * 60 * 1000; // 5 min (YouTube CDN URLs last ~6 h)
+const CACHE_TTL_MS   = 45 * 60 * 1000; // 45 min (YouTube CDN URLs last ~6 h)
 
 const MIME = {
   '.html':'text/html', '.css':'text/css', '.js':'application/javascript',
@@ -355,7 +355,7 @@ const server = http.createServer(async (req, res) => {
   rl.count++;
   global.rateLimit.set(ip, rl);
 
-  if (rl.count > 50) { // Max 50 requests per minute per IP
+  if (rl.count > 200) { // Max 200 requests per minute per IP
     return json({ error: 'Too many requests. Please try again later.' }, 429);
   }
 
@@ -391,6 +391,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+
+  // ── /api/warmup  (pre-extract audio URL into cache, BLOCKS until ready) ──
+  if (p === '/api/warmup') {
+    const id = u.searchParams.get('id');
+    if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ ok: false }, 400);
+    // If already cached, respond immediately
+    const cached = urlCache.get(id);
+    if (cached && cached.expiresAt > Date.now()) {
+      return json({ ok: true, cached: true });
+    }
+    // Otherwise, await extraction so the client knows the URL is ready
+    try {
+      await extractAudioUrl(id);
+      console.log(`[warmup] pre-extracted ${id}`);
+      return json({ ok: true, cached: false });
+    } catch(e) {
+      console.warn(`[warmup] failed for ${id}:`, e.message);
+      return json({ ok: false, error: e.message }, 502);
+    }
+  }
 
   // ── /api/download ────────────────────────────────────────────────────────
   if (p === '/api/download') {
