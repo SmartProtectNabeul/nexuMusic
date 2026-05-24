@@ -448,9 +448,14 @@ const server = http.createServer(async (req, res) => {
     await ensureYtDlp();
     const rangeHeader = req.headers.range;
 
-    if (rangeHeader) {
+    // Detect a real seek: Range header with a non-zero start byte.
+    // "bytes=0-" is just the browser's initial probe — treat it like no range.
+    const rangeStart = rangeHeader ? parseInt((rangeHeader.match(/bytes=(\d+)-/) || [])[1] || '0', 10) : 0;
+    const isRealSeek = rangeHeader && rangeStart > 0;
+
+    if (isRealSeek) {
       // ── Seek / Range request ───────────────────────────────────────────────
-      console.log(`[stream] range request for ${id}: ${rangeHeader}`);
+      console.log(`[stream] seek range for ${id}: ${rangeHeader} (start=${rangeStart})`);
       try {
         const fmt = await extractAudioUrl(id); // instant if already cached
         https.get(fmt.url, {
