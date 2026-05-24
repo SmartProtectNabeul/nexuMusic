@@ -426,31 +426,81 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── /api/stream  ─────────────────────────────────────────────────────────
-  // Pipes yt-dlp stdout DIRECTLY to the HTTP response.
-  // First audio bytes arrive in ~1-2 s — no URL-extraction round-trip.
+  // ── /api/stream ──────────────────────────────────────────────────────────
+  //
+  // TWO modes depending on whether the client sends a Range header:
+  //
+  //  • No Range header (initial play):
+  //      Spawn yt-dlp with -o - and pipe stdout straight to the response.
+  //      First audio bytes arrive in ~1-2 s.
+  //      Also kicks off extractAudioUrl() in the background so the CDN URL
+  //      is cached and ready by the time the user tries to seek.
+  //
+  //  • Range header (seek):
+  //      Forward the byte-range request to the cached YouTube CDN URL.
+  //      This is instant when the URL is already cached, otherwise waits
+  //      for extractAudioUrl to finish (usually done before user can seek).
+  //
   if (p === '/api/stream') {
     const id = u.searchParams.get('id');
     if (!id || !/^[a-zA-Z0-9_-]{6,15}$/.test(id)) return json({ error: 'Invalid id' }, 400);
 
     await ensureYtDlp();
+    const rangeHeader = req.headers.range;
+
+    if (rangeHeader) {
+      // ── Seek / Range request ───────────────────────────────────────────────
+      console.log(`[stream] range request for ${id}: ${rangeHeader}`);
+      try {
+        const fmt = await extractAudioUrl(id); // instant if already cached
+        https.get(fmt.url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+            'Referer':    'https://www.youtube.com/',
+            'Origin':     'https://www.youtube.com',
+            'Range':      rangeHeader,
+          },
+        }, audioRes => {
+          const outHeaders = {
+            'Content-Type':  fmt.mimeType || 'audio/webm',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+          };
+          if (audioRes.headers['content-length']) outHeaders['Content-Length'] = audioRes.headers['content-length'];
+          if (audioRes.headers['content-range'])  outHeaders['Content-Range']  = audioRes.headers['content-range'];
+          res.writeHead(audioRes.statusCode || 206, outHeaders);
+          audioRes.pipe(res);
+          audioRes.on('error', e => { if (!res.writableEnded) res.end(); });
+        }).on('error', e => {
+          console.error('[stream] CDN range error:', e.message);
+          if (!res.headersSent) json({ error: 'CDN range fetch failed' }, 502);
+        });
+      } catch (e) {
+        console.error('[stream] range extract error:', e.message);
+        if (!res.headersSent) json({ error: e.message }, 502);
+      }
+      return;
+    }
+
+    // ── Initial play (no Range header) ────────────────────────────────────────
     console.log(`[stream] direct pipe for ${id}`);
 
-    // Write headers immediately so the browser knows a stream is coming
+    // Fire URL extraction in background so seeks will be instant later.
+    // The dedup map ensures only one yt-dlp -g runs even if called twice.
+    extractAudioUrl(id).catch(() => {});
+
     res.writeHead(200, {
-      'Content-Type': 'audio/webm',
+      'Content-Type':      'audio/webm',
       'Transfer-Encoding': 'chunked',
-      'Accept-Ranges': 'none',
-      'Cache-Control': 'no-cache',
+      'Accept-Ranges':     'bytes',   // tell browser seeking is supported
+      'Cache-Control':     'no-cache',
       'Access-Control-Allow-Origin': '*',
     });
 
     const ytdlp = spawn(BIN_PATH, [
       '-f', 'bestaudio[ext=webm]/bestaudio/best',
-      '--no-playlist',
-      '--no-warnings',
-      '--quiet',
-      '-o', '-',                    // output to stdout
+      '--no-playlist', '--no-warnings', '--quiet',
+      '-o', '-',
       '--socket-timeout', '10',
       `https://www.youtube.com/watch?v=${id}`,
     ]);
@@ -460,25 +510,17 @@ const server = http.createServer(async (req, res) => {
       bytesWritten += chunk.length;
       if (!res.writableEnded) res.write(chunk);
     });
-
     ytdlp.on('close', code => {
-      console.log(`[stream] yt-dlp closed (code=${code}, bytes=${bytesWritten}) for ${id}`);
+      console.log(`[stream] done (code=${code}, bytes=${bytesWritten}) for ${id}`);
       if (!res.writableEnded) res.end();
     });
-
     ytdlp.on('error', e => {
       console.error('[stream] spawn error:', e.message);
       if (!res.writableEnded) res.end();
     });
-
-    // If the client disconnects, kill yt-dlp immediately
     req.on('close', () => {
-      if (!ytdlp.killed) {
-        ytdlp.kill('SIGTERM');
-        console.log(`[stream] client disconnected, killed yt-dlp for ${id}`);
-      }
+      if (!ytdlp.killed) { ytdlp.kill('SIGTERM'); }
     });
-
     return;
   }
 
