@@ -281,7 +281,7 @@ async function extractAudioUrl(id) {
     console.log(`[extract] Running yt-dlp for ${id}...`);
     execFile(
       BIN_PATH,
-      ['-f', 'bestaudio', '-g', '--no-playlist', '--no-warnings',
+      ['-f', 'bestaudio', '--print', '%(ext)s|%(url)s', '--no-playlist', '--no-warnings',
        '--socket-timeout', '8',
        `https://www.youtube.com/watch?v=${id}`],
       { timeout: 22000 },   // built-in execFile timeout — sends SIGTERM
@@ -298,7 +298,17 @@ async function extractAudioUrl(id) {
             return reject(new Error('Audio extraction failed'));
           }
         }
-        const directUrl = (stdout || '').trim().split('\n')[0];
+        const stdoutStr = (stdout || '').trim();
+        const separatorIdx = stdoutStr.indexOf('|');
+        let ext = '';
+        let directUrl = '';
+        if (separatorIdx !== -1) {
+          ext = stdoutStr.slice(0, separatorIdx).trim();
+          directUrl = stdoutStr.slice(separatorIdx + 1).trim();
+        } else {
+          directUrl = stdoutStr.split('\n')[0];
+        }
+
         if (!directUrl) {
           console.warn(`[extract] No audio URL from yt-dlp for ${id}, trying fallback`);
           try {
@@ -310,9 +320,19 @@ async function extractAudioUrl(id) {
             return reject(new Error('No audio URL from yt-dlp or fallbacks'));
           }
         }
-        const result = { url: directUrl, mimeType: 'audio/webm', bitrate: 128000 };
+
+        let mimeType = 'audio/webm';
+        if (ext === 'm4a' || ext === 'mp4') {
+          mimeType = 'audio/mp4';
+        } else if (ext === 'webm') {
+          mimeType = 'audio/webm';
+        } else if (ext === 'ogg') {
+          mimeType = 'audio/ogg';
+        }
+
+        const result = { url: directUrl, mimeType, bitrate: 128000 };
         urlCache.set(id, { ...result, expiresAt: Date.now() + CACHE_TTL_MS });
-        console.log(`[extract] SUCCESS for ${id}`);
+        console.log(`[extract] SUCCESS for ${id} (ext=${ext}, mime=${mimeType})`);
         resolve(result);
       }
     );
@@ -407,10 +427,11 @@ const server = http.createServer(async (req, res) => {
           'Origin': 'https://www.youtube.com',
         }
       }, audioRes => {
+        const fileExt = fmt.mimeType === 'audio/mp4' ? 'm4a' : 'webm';
         res.writeHead(200, {
           'Content-Type': fmt.mimeType || 'audio/webm',
           'Content-Length': audioRes.headers['content-length'] || '',
-          'Content-Disposition': `attachment; filename="${id}.webm"`,
+          'Content-Disposition': `attachment; filename="${id}.${fileExt}"`,
           'Access-Control-Allow-Origin': '*',
         });
         audioRes.pipe(res);
@@ -495,7 +516,7 @@ const server = http.createServer(async (req, res) => {
     extractAudioUrl(id).catch(() => {});
 
     res.writeHead(200, {
-      'Content-Type':      'audio/webm',
+      'Content-Type':      'audio/mp4',
       'Transfer-Encoding': 'chunked',
       'Accept-Ranges':     'bytes',   // tell browser seeking is supported
       'Cache-Control':     'no-cache',
@@ -503,7 +524,7 @@ const server = http.createServer(async (req, res) => {
     });
 
     const ytdlp = spawn(BIN_PATH, [
-      '-f', 'bestaudio[ext=webm]/bestaudio/best',
+      '-f', 'bestaudio[ext=m4a]/bestaudio/best',
       '--no-playlist', '--no-warnings', '--quiet',
       '-o', '-',
       '--socket-timeout', '10',
