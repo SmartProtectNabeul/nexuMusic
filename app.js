@@ -16,6 +16,7 @@ const S = {
   volume: 80, muted: false,
   playing: false, current: null,
   view: 'home', currentPl: null, ctxTrack: null,
+  useLocalPlayer: false, localObjectURL: null,
   ytPlayer: null, ytReady: false,
 };
 
@@ -67,11 +68,15 @@ function onYT(e) {
 function updateMediaPosition() {
   if ('mediaSession' in navigator && navigator.mediaSession.setPositionState) {
     try {
-      if (S.ytReady) {
-        const dur = S.ytPlayer.getDuration()||0;
-        const cur = S.ytPlayer.getCurrentTime()||0;
-        if (dur > 0) navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: cur });
+      let dur = 0, cur = 0;
+      if (S.useLocalPlayer) {
+        dur = localPlayer.duration || 0;
+        cur = localPlayer.currentTime || 0;
+      } else if (S.ytReady) {
+        dur = S.ytPlayer.getDuration()||0;
+        cur = S.ytPlayer.getCurrentTime()||0;
       }
+      if (dur > 0) navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: cur });
     } catch(e) {}
   }
 }
@@ -79,6 +84,17 @@ function updateMediaPosition() {
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const bgAudio = $('bg-audio');
+const localPlayer = $('local-player');
+
+localPlayer.addEventListener('ended', () => { S.repeat ? localPlayer.play() : nextTrack(); });
+localPlayer.addEventListener('play', () => {
+  S.playing = true; updateBtn(); startLoop();
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+});
+localPlayer.addEventListener('pause', () => {
+  S.playing = false; updateBtn();
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+});
 let _restoredState = null; // set by loadPlaybackState; consumed on first play press
 
 const fmt = s => { s=Math.floor(s||0); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
@@ -108,6 +124,68 @@ function toTrack(item) {
     thumb:    item.thumbnail || '',
     duration: item.lengthSeconds > 0 ? fmt(item.lengthSeconds) : '',
   };
+}
+
+// ── Offline Storage (IndexedDB) ───────────────────────────────────────────────
+const dbName = 'nexuMusicDB';
+const storeName = 'offlineTracks';
+let _dbPromise;
+
+function getDB() {
+  if (!_dbPromise) {
+    _dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(dbName, 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore(storeName);
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror = () => reject('IDB Error');
+    });
+  }
+  return _dbPromise;
+}
+
+async function saveOfflineAudio(id, blob) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).put(blob, id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject('Save failed');
+  });
+}
+
+async function getOfflineAudio(id) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject('Get failed');
+  });
+}
+
+async function deleteOfflineAudio(id) {
+  const db = await getDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).delete(id);
+    tx.oncomplete = () => resolve();
+  });
+}
+
+async function downloadForOffline(track) {
+  try {
+    toast('Downloading "' + track.title + '" for offline...');
+    const res = await apiFetch(`/api/download-url?id=${track.id}`);
+    if (!res.downloadUrl) throw new Error('No download URL');
+    const audioRes = await fetch(res.downloadUrl);
+    if (!audioRes.ok) throw new Error('Download failed');
+    const blob = await audioRes.blob();
+    await saveOfflineAudio(track.id, blob);
+    toast('"' + track.title + '" downloaded!');
+  } catch (err) {
+    console.error('Offline download error:', err);
+    toast('Failed to download "' + track.title + '"');
+  }
 }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
@@ -206,19 +284,42 @@ async function playTrack(t, startTime = 0) {
   if (!t) return;
   S.current = t;
 
-  if (S.ytReady) {
-    S.ytPlayer.pauseVideo(); // Prevent previous song audio bleeding while new video loads
-    S.ytPlayer.mute(); // Mute immediately to hide any pre-roll ads before P.PLAYING check
-    if (startTime > 0) {
-      S.ytPlayer.loadVideoById({ videoId: t.id, startSeconds: startTime });
-    } else {
-      S.ytPlayer.loadVideoById(t.id);
-    }
+  if (S.localObjectURL) {
+    URL.revokeObjectURL(S.localObjectURL);
+    S.localObjectURL = null;
+  }
+  localPlayer.pause();
+  S.useLocalPlayer = false;
+
+  const blob = await getOfflineAudio(t.id).catch(() => null);
+  if (blob) {
+    S.useLocalPlayer = true;
+    S.localObjectURL = URL.createObjectURL(blob);
+    localPlayer.src = S.localObjectURL;
+    if (startTime > 0) localPlayer.currentTime = startTime;
+    localPlayer.volume = S.volume / 100;
+    localPlayer.muted = S.muted;
+    localPlayer.play().catch(()=>{});
+    
+    if (S.ytReady) S.ytPlayer.pauseVideo();
     S.playing = true;
     updateBtn();
     bgAudio.play().catch(() => {});
   } else {
-    toast('Player loading, please try again...');
+    if (S.ytReady) {
+      S.ytPlayer.pauseVideo(); // Prevent previous song audio bleeding while new video loads
+      S.ytPlayer.mute(); // Mute immediately to hide any pre-roll ads before P.PLAYING check
+      if (startTime > 0) {
+        S.ytPlayer.loadVideoById({ videoId: t.id, startSeconds: startTime });
+      } else {
+        S.ytPlayer.loadVideoById(t.id);
+      }
+      S.playing = true;
+      updateBtn();
+      bgAudio.play().catch(() => {});
+    } else {
+      toast('Player loading, please try again...');
+    }
   }
 
   updateNP();
@@ -239,18 +340,20 @@ function updateNP() {
       artist: t.artist,
       artwork: [{ src: t.thumb || '', sizes: '512x512', type: 'image/jpeg' }]
     });
-    navigator.mediaSession.setActionHandler('play', () => { if(S.ytReady) S.ytPlayer.playVideo(); bgAudio.play().catch(()=>{}); });
-    navigator.mediaSession.setActionHandler('pause', () => { if(S.ytReady) S.ytPlayer.pauseVideo(); });
+    navigator.mediaSession.setActionHandler('play', () => { if (S.useLocalPlayer) localPlayer.play(); else if(S.ytReady) S.ytPlayer.playVideo(); bgAudio.play().catch(()=>{}); });
+    navigator.mediaSession.setActionHandler('pause', () => { if (S.useLocalPlayer) localPlayer.pause(); else if(S.ytReady) S.ytPlayer.pauseVideo(); });
     navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
     navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
     navigator.mediaSession.setActionHandler('seekto', (d) => {
-      if(d.seekTime !== undefined && S.ytReady) { 
-        S.ytPlayer.seekTo(d.seekTime); 
+      if(d.seekTime !== undefined) { 
+        if (S.useLocalPlayer) localPlayer.currentTime = d.seekTime;
+        else if (S.ytReady) S.ytPlayer.seekTo(d.seekTime); 
         updateMediaPosition(); 
       }
     });
     navigator.mediaSession.setActionHandler('stop', () => {
-      if(S.ytReady) S.ytPlayer.pauseVideo();
+      if (S.useLocalPlayer) localPlayer.pause();
+      else if(S.ytReady) S.ytPlayer.pauseVideo();
       if(bgAudio) bgAudio.pause();
       navigator.mediaSession.playbackState = 'none';
       S.playing = false;
@@ -262,7 +365,8 @@ function updateBtn(){ $('icon-play').classList.toggle('hidden',S.playing); $('ic
 $('btn-play-pause').addEventListener('click',()=>{
   if(!S.current) return; // nothing loaded yet
   if (S.playing) {
-    S.ytPlayer?.pauseVideo();
+    if (S.useLocalPlayer) localPlayer.pause();
+    else S.ytPlayer?.pauseVideo();
   } else {
     if (_restoredState) {
       // First play after page restore — player hasn't been primed yet
@@ -270,7 +374,8 @@ $('btn-play-pause').addEventListener('click',()=>{
       _restoredState = null;
       playTrack(rs.track, rs.time); // resume from saved position
     } else {
-      S.ytPlayer?.playVideo();
+      if (S.useLocalPlayer) localPlayer.play();
+      else S.ytPlayer?.playVideo();
     }
   }
 });
@@ -305,15 +410,21 @@ function startLoop() {
   clearInterval(loopId);
   loopId=setInterval(()=>{
     if(!S.playing||isDraggingProgress) return;
-    if(!S.ytReady) return;
-    const cur=S.ytPlayer.getCurrentTime()||0;
-    const dur=S.ytPlayer.getDuration()||0;
+    let cur=0, dur=0;
+    if (S.useLocalPlayer) {
+      cur = localPlayer.currentTime || 0;
+      dur = localPlayer.duration || 0;
+    } else if (S.ytReady) {
+      cur = S.ytPlayer.getCurrentTime()||0;
+      dur = S.ytPlayer.getDuration()||0;
+    }
     if(!dur) return;
     updateProgressUI((cur/dur)*100, cur, dur);
   }, 100);
 }
 
 function getDuration() {
+  if (S.useLocalPlayer) return localPlayer.duration || 0;
   return S.ytPlayer?.getDuration() || 0;
 }
 
@@ -343,7 +454,10 @@ $('progress-bar').addEventListener('pointerup', e => {
   isDraggingProgress = false;
   $('progress-bar').releasePointerCapture(e.pointerId);
   const pct = handleProgressDrag(e);
-  if (S.ytReady) {
+  if (S.useLocalPlayer) {
+    localPlayer.currentTime = pct * _dragDuration;
+    setTimeout(updateMediaPosition, 200);
+  } else if (S.ytReady) {
     S.ytPlayer.seekTo(pct * _dragDuration);
     setTimeout(updateMediaPosition, 200);
   }
@@ -354,6 +468,7 @@ let isDraggingVolume = false;
 
 function ytVol(v) {
   S.volume=Math.max(0,Math.min(100,v)); 
+  if (S.useLocalPlayer) localPlayer.volume = S.volume / 100;
   if(S.ytReady) S.ytPlayer.setVolume(S.volume);
   $('volume-fill').style.width=S.volume+'%'; $('volume-thumb').style.left=S.volume+'%';
 }
@@ -381,6 +496,7 @@ $('volume-bar').addEventListener('pointerup', e => {
 
 $('btn-mute').addEventListener('click',()=>{
   S.muted=!S.muted; 
+  if (S.useLocalPlayer) localPlayer.muted = S.muted;
   S.ytReady&&(S.muted?S.ytPlayer.mute():S.ytPlayer.unMute());
   $('icon-volume').classList.toggle('hidden',S.muted); $('icon-muted').classList.toggle('hidden',!S.muted);
 });

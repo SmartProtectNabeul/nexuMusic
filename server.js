@@ -181,6 +181,40 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── /api/download-url ────────────────────────────────────────────────────
+  if (p === '/api/download-url') {
+    const id = u.searchParams.get('id');
+    if (!id) return json({ error: 'Missing id' }, 400);
+    
+    try {
+      const url = `https://youtube-mp310.p.rapidapi.com/download/mp3?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D${id}`;
+      const opts = {
+        headers: {
+          'x-rapidapi-host': 'youtube-mp310.p.rapidapi.com',
+          'x-rapidapi-key': '10d27a8d6emsh0abc79c9c45bf45p11da39jsn34d3a119dd01'
+        }
+      };
+      
+      https.get(url, opts, (rapidRes) => {
+        let data = '';
+        rapidRes.on('data', d => data += d);
+        rapidRes.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            json(parsed);
+          } catch(e) {
+            json({ error: 'Failed to parse response' }, 500);
+          }
+        });
+      }).on('error', (err) => {
+        json({ error: err.message }, 500);
+      });
+    } catch (err) {
+      json({ error: err.message }, 500);
+    }
+    return;
+  }
+
   // ── Static files ─────────────────────────────────────────────────────────
   const filePath = path.join(DIR, p === '/' ? 'index.html' : p);
   const ext = path.extname(filePath);
