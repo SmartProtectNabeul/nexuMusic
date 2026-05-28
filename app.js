@@ -34,6 +34,20 @@ function onYT(e) {
   const P = YT.PlayerState;
   if (e.data === P.ENDED)    { S.repeat ? S.ytPlayer.seekTo(0) : nextTrack(); }
   if (e.data === P.PLAYING)  { 
+    const expectedDur = S.current && S.current.duration ? S.current.duration.split(':').reduce((acc, time) => (60 * acc) + Number(time), 0) : 0;
+    const actualDur = S.ytPlayer.getDuration() || 0;
+    
+    // If durations differ by > 15s and it's not a short track, it's likely an ad.
+    if (expectedDur > 0 && actualDur > 0 && Math.abs(expectedDur - actualDur) > 15) {
+      S.ytPlayer.mute();
+      S.ytPlayer.setPlaybackRate(2.0); // fast forward the ad if possible
+      return; // Do not update UI or set playing=true yet
+    }
+    
+    // It's the real song
+    S.ytPlayer.unMute();
+    S.ytPlayer.setPlaybackRate(1.0);
+
     S.playing = true;  updateBtn(); startLoop(); 
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
@@ -192,6 +206,7 @@ async function playTrack(t, startTime = 0) {
   S.current = t;
 
   if (S.ytReady) {
+    S.ytPlayer.pauseVideo(); // Prevent previous song audio bleeding while new video loads
     if (startTime > 0) {
       S.ytPlayer.loadVideoById({ videoId: t.id, startSeconds: startTime });
     } else {
