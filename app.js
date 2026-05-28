@@ -40,7 +40,8 @@ function onYT(e) {
     // If durations differ by > 15s and it's not a short track, it's likely an ad.
     if (expectedDur > 0 && actualDur > 0 && Math.abs(expectedDur - actualDur) > 15) {
       S.ytPlayer.mute();
-      S.ytPlayer.setPlaybackRate(2.0); // fast forward the ad if possible
+      S.ytPlayer.setPlaybackRate(16.0); // fallback for unskippable ads
+      S.ytPlayer.seekTo(actualDur); // skip ad instantly
       return; // Do not update UI or set playing=true yet
     }
     
