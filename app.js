@@ -207,6 +207,7 @@ async function playTrack(t, startTime = 0) {
 
   if (S.ytReady) {
     S.ytPlayer.pauseVideo(); // Prevent previous song audio bleeding while new video loads
+    S.ytPlayer.mute(); // Mute immediately to hide any pre-roll ads before P.PLAYING check
     if (startTime > 0) {
       S.ytPlayer.loadVideoById({ videoId: t.id, startSeconds: startTime });
     } else {
